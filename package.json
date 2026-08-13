@@ -1,0 +1,28 @@
+{
+  "name": "walfly",
+  "private": true,
+  "version": "0.0.1",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "concurrently -n api,mobile -c blue,green \"npm run dev --workspace=packages/api\" \"npm run dev --workspace=apps/mobile\"",
+    "dev:api": "npm run dev --workspace=packages/api",
+    "dev:mobile": "npm run dev --workspace=apps/mobile",
+    "build": "npm run build --workspace=packages/db && npm run build --workspace=packages/api && npm run build --workspace=apps/mobile",
+    "build:api": "npm run build --workspace=packages/api",
+    "build:mobile": "npm run build --workspace=apps/mobile"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.0"
+  },
+  "overrides": {
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0",
+    "@walfly/mobile": {
+      "react": "18.3.1",
+      "react-dom": "18.3.1"
+    }
+  }
+}

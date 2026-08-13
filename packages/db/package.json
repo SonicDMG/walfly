@@ -1,0 +1,20 @@
+{
+  "name": "@walfly/db",
+  "version": "0.0.1",
+  "private": true,
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "scripts": {
+    "build": "tsc --noEmit",
+    "seed": "tsx src/seed-schema.ts"
+  },
+  "dependencies": {
+    "@datastax/astra-db-ts": "^1.5.0",
+    "dotenv": "^16.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.0.0",
+    "typescript": "^5.7.0"
+  }
+}
