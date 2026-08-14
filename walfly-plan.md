@@ -216,7 +216,7 @@ walfly/
 
 **Relevant Context:** `expo-av` `Audio.Recording`, `expo-location.requestForegroundPermissionsAsync`, `braille` npm package, Expo web compatibility notes, Nominatim reverse-geocode API (no key required)
 
-**Status:** [ ] pending
+**Status:** [x] done
 
 ---
 
@@ -246,7 +246,7 @@ walfly/
 
 **Relevant Context:** Expo Router file-based routing, `FlatList`, React Query or `useSWR` for data fetching, `braille` for any loading states
 
-**Status:** [ ] pending
+**Status:** [x] done
 
 ---
 
@@ -275,7 +275,7 @@ walfly/
 
 **Relevant Context:** Expo Router, `useLocalSearchParams` for `id`, React state for expand/collapse
 
-**Status:** [ ] pending
+**Status:** [x] done
 
 ---
 
@@ -313,7 +313,7 @@ walfly/
 
 **Relevant Context:** OpenAI Responses API + Conversations API streaming, Vercel Edge `ReadableStream`, `EventSource` API, RAG pattern with Astra `sort.$vectorize`
 
-**Status:** [ ] pending
+**Status:** [x] done
 
 ---
 
