@@ -6,7 +6,9 @@
  */
 
 import { useState, useRef } from 'react';
+import { Platform } from 'react-native';
 import { Audio } from 'expo-av';
+import * as FileSystem from 'expo-file-system';
 import { apiUrl } from '../lib/api';
 import { useLocationPermission } from './useLocationPermission';
 
@@ -84,13 +86,32 @@ export function useRecordingUpload() {
       const durationSec = Math.round((Date.now() - startTimeRef.current) / 1000);
       const locationSnap = locationSnapshotRef.current;
 
-      // Build multipart form
+      // On web, expo-av returns a blob: URI — fetch it directly to get a Blob.
+      // On native, expo-file-system reads the file as base64 which we decode to a Blob,
+      // because expo-file-system.readAsStringAsync is not available on web.
+      let audioBlob: Blob;
+      let audioFilename: string;
+      if (Platform.OS === 'web') {
+        const raw = await fetch(uri).then((r) => r.blob());
+        // Browsers record as webm but Docling supports mp4 — re-wrap with mp4 MIME
+        // and filename so the server and transcription pipeline treat it correctly.
+        audioBlob = new Blob([raw], { type: 'video/mp4' });
+        audioFilename = 'recording.mp4';
+      } else {
+        const base64 = await FileSystem.readAsStringAsync(uri, {
+          encoding: FileSystem.EncodingType.Base64,
+        });
+        const byteChars = atob(base64);
+        const byteArr = new Uint8Array(byteChars.length);
+        for (let i = 0; i < byteChars.length; i++) {
+          byteArr[i] = byteChars.charCodeAt(i);
+        }
+        audioBlob = new Blob([byteArr], { type: 'audio/m4a' });
+        audioFilename = 'recording.m4a';
+      }
+
       const formData = new FormData();
-      formData.append('audio', {
-        uri,
-        name: 'recording.m4a',
-        type: 'audio/m4a',
-      } as unknown as Blob);
+      formData.append('audio', audioBlob, audioFilename);
       formData.append('duration', String(durationSec));
       formData.append('clientTimestamp', startTimestampRef.current);
       if (locationSnap) {

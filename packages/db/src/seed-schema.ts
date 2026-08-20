@@ -3,7 +3,7 @@
  *
  * Idempotently creates the `recordings` collection in Astra DB with:
  *   - UUID default IDs
- *   - Built-in vectorize (nvidia NV-Embed-QA via Astra's integrated embedding)
+ *   - Built-in vectorize (nvidia/nv-embedqa-e5-v5 via Astra's integrated embedding)
  *
  * Run with:
  *   npm run seed --workspace=packages/db
@@ -11,46 +11,54 @@
  * Requires ASTRA_DB_API_ENDPOINT and ASTRA_DB_APPLICATION_TOKEN in env.
  */
 
-import 'dotenv/config';
+import { config } from 'dotenv';
+import { resolve } from 'path';
+
+// Load from packages/api/.env.local (where Astra credentials live)
+config({ path: resolve(__dirname, '../../api/.env.local') });
 import { getDb } from './client';
 
 const COLLECTION_NAME = 'recordings';
 
-// Astra's integrated vectorize dimension for nvidia NV-Embed-QA is 1024.
-// See: https://docs.datastax.com/en/astra-db-serverless/databases/embedding-generation.html
-const VECTOR_DIMENSION = 1024;
-
 async function seed() {
-  const db = getDb();
+  console.log('[seed] Starting...');
+  console.log(`[seed] ASTRA_DB_API_ENDPOINT : ${process.env.ASTRA_DB_API_ENDPOINT ?? '(not set)'}`);
+  console.log(`[seed] ASTRA_DB_APPLICATION_TOKEN : ${process.env.ASTRA_DB_APPLICATION_TOKEN ? '(set)' : '(not set)'}`);
 
-  // List existing collections to check idempotency
+  const db = getDb();
+  console.log('[seed] DB client initialised');
+
+  console.log('[seed] Listing existing collections...');
   const existing = await db.listCollections();
   const names = existing.map((c) => c.name);
+  console.log(`[seed] Found collections: ${names.length ? names.join(', ') : '(none)'}`);
 
   if (names.includes(COLLECTION_NAME)) {
-    console.log(`Collection "${COLLECTION_NAME}" already exists — skipping creation.`);
+    console.log(`[seed] Collection "${COLLECTION_NAME}" already exists — skipping creation.`);
     return;
   }
 
-  await db.createCollection(COLLECTION_NAME, {
-    defaultId: { type: 'uuid' },
+  const options = {
+    defaultId: { type: 'uuid' as const },
     vector: {
-      dimension: VECTOR_DIMENSION,
-      metric: 'cosine',
+      metric: 'cosine' as const,
       service: {
         provider: 'nvidia',
-        modelName: 'NV-Embed-QA',
+        modelName: 'nvidia/nv-embedqa-e5-v5',
       },
     },
-  });
+  };
+  console.log(`[seed] Creating collection "${COLLECTION_NAME}" with options:`);
+  console.log(JSON.stringify(options, null, 2));
 
-  console.log(`Collection "${COLLECTION_NAME}" created successfully.`);
-  console.log(`  dimension : ${VECTOR_DIMENSION}`);
-  console.log(`  metric    : cosine`);
-  console.log(`  vectorize : nvidia/NV-Embed-QA`);
+  await db.createCollection(COLLECTION_NAME, options);
+
+  console.log(`[seed] Collection "${COLLECTION_NAME}" created successfully.`);
+  console.log(`[seed]   metric    : cosine`);
+  console.log(`[seed]   vectorize : nvidia/nv-embedqa-e5-v5`);
 }
 
 seed().catch((err) => {
-  console.error('Seed failed:', err);
+  console.error('[seed] Failed:', err);
   process.exit(1);
 });

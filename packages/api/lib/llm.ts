@@ -15,7 +15,7 @@ function getLlmClient(): OpenAI {
   const apiKey = process.env.LLM_API_KEY;
 
   if (!apiKey) {
-    throw new Error('Missing LLM_API_KEY env var');
+    throw new Error('Missing LLM_API_KEY env var — set LLM_API_KEY (use "ollama" for local Ollama)');
   }
 
   return new OpenAI({
