@@ -32,7 +32,7 @@ export default function RecordScreen() {
     if (state === 'recording') {
       Animated.loop(
         Animated.sequence([
-          Animated.timing(pulseAnim, { toValue: 1.15, duration: 600, useNativeDriver: true }),
+          Animated.timing(pulseAnim, { toValue: 0.55, duration: 600, useNativeDriver: true }),
           Animated.timing(pulseAnim, { toValue: 1, duration: 600, useNativeDriver: true }),
         ]),
       ).start();
@@ -77,12 +77,9 @@ export default function RecordScreen() {
             isActive && styles.buttonActive,
             isDone && styles.buttonDone,
             isBusy && styles.buttonBusy,
-            { transform: [{ scale: pulseAnim }] },
+            { opacity: isActive ? pulseAnim : 1 },
           ]}
         >
-          <Text style={styles.buttonIcon}>
-            {isDone ? '✓' : isActive ? '■' : '●'}
-          </Text>
         </Animated.View>
       </Pressable>
 
@@ -165,7 +162,7 @@ const styles = StyleSheet.create({
     width: 140,
     height: 140,
     borderRadius: 70,
-    backgroundColor: '#f0f0f0',
+    backgroundColor: RED,
     alignItems: 'center',
     justifyContent: 'center',
     shadowColor: '#000',
@@ -175,18 +172,13 @@ const styles = StyleSheet.create({
     elevation: 4,
   },
   buttonActive: {
-    backgroundColor: RED,
+    // color stays red — shape change handled inline
   },
   buttonDone: {
     backgroundColor: '#43A047',
   },
   buttonBusy: {
     opacity: 0.5,
-  },
-  buttonIcon: {
-    fontSize: 52,
-    color: '#fff',
-    lineHeight: 60,
   },
   progressContainer: {
     alignItems: 'center',
