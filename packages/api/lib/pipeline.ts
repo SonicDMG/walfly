@@ -8,13 +8,16 @@
  * mid-step crash recoverable: the lease simply expires and the next tick
  * resumes from the last durable state.
  *
- * Failure handling has two tiers, because "the Blob CDN returned one 500" and
- * "this audio is not a format Docling can read" are not the same event. A
- * retryable error frees the lease, bumps an attempt counter and leaves the
- * status alone so the next tick retries; only a non-retryable error, or one
- * that has already burned MAX_TRANSIENT_ATTEMPTS, is written as a terminal
- * failure. Nothing here ever throws — the caller is an HTTP route that must
- * answer 200 or 404.
+ * Transcription is a single synchronous Whisper API call: uploaded → transcribe
+ * (loadAudio + Whisper) → storeTranscript → enriching. There is no polling loop
+ * and no task id to persist.
+ *
+ * Failure handling has two tiers, because "the network hiccuped" and "this audio
+ * format is unsupported" are not the same event. A retryable error frees the
+ * lease, bumps an attempt counter and leaves the status alone so the next tick
+ * retries; only a non-retryable error, or one that has already burned
+ * MAX_TRANSIENT_ATTEMPTS, is written as a terminal failure. Nothing here ever
+ * throws — the caller is an HTTP route that must answer 200 or 404.
  *
  * Lease durations are deliberately longer than the worst-case wall time of the
  * work they guard (see the constants), otherwise a slow step would be re-leased
@@ -25,23 +28,20 @@
  */
 
 import type { PipelineStage, RecordingStatus } from '@walfly/db';
-import { DoclingError } from './docling';
 import { enrichTranscript } from './enrich';
 import {
-  acquireLease, getPipelineRecord, recordTransientFailure, releaseLease, storeDoclingTaskId,
+  acquireLease, getPipelineRecord, recordTransientFailure,
   storeEnrichment, storeFailure, storeTranscript,
 } from './store';
-import { fetchTranscriptionResult, pollTranscriptionJob, submitTranscriptionJob } from './transcribe';
+import { TranscriptionError, transcribeAudio } from './transcribe';
 
-/** Worst case: loadAudio (60 s) + the Docling submit (120 s), plus slack. */
-const LEASE_SUBMIT_MS = 240_000;
-/** Worst case: poll (20 s) + single-use result fetch (60 s) + the Astra write. */
-const LEASE_TRANSCRIBE_MS = 120_000;
+/**
+ * Worst case: loadAudio (60 s) + Whisper synchronous transcription (up to 10 min).
+ * The Whisper client itself has a 10-minute timeout; add slack for the Astra write.
+ */
+const LEASE_TRANSCRIBE_MS = 12 * 60 * 1000;
 /** Worst case: two LLM attempts at 60 s each (llm.ts sets maxRetries: 0), plus slack. */
 const LEASE_ENRICH_MS = 240_000;
-
-/** A Docling job that has not finished in this long is treated as lost. */
-const TRANSCRIBE_DEADLINE_MS = 20 * 60 * 1000;
 
 /** Consecutive retryable failures on one step before the job is declared dead. */
 const MAX_TRANSIENT_ATTEMPTS = 5;
@@ -73,63 +73,13 @@ export async function advanceRecording(id: string): Promise<AdvanceResult> {
       return { found: true, id, status: record.status, stage: 'done', error: null, retryAfterMs: 0 };
     }
 
-    // ---- uploaded → submit the Docling job -------------------------------
+    // ---- uploaded → transcribe (single synchronous Whisper call) ---------
     if (record.status === 'uploaded') {
-      stage = 'submit';
-      if (!(await acquireLease(id, 'uploaded', LEASE_SUBMIT_MS))) {
-        return waiting(id, 'uploaded', 'submit', 2000);
-      }
-      const taskId = await submitTranscriptionJob(record.audioUrl);
-      await storeDoclingTaskId(id, taskId);
-      console.log(`[pipeline] ${id} submitted docling task ${taskId}`);
-      return { found: true, id, status: 'transcribing', stage: 'transcribe', error: null, retryAfterMs: 4000 };
-    }
-
-    // ---- transcribing ----------------------------------------------------
-    if (record.status === 'transcribing') {
       stage = 'transcribe';
-
-      // The submit step crashed before the task id was persisted. Resubmit
-      // once the lease has expired.
-      if (!record.doclingTaskId) {
-        if (!(await acquireLease(id, 'transcribing', LEASE_SUBMIT_MS))) {
-          return waiting(id, 'transcribing', 'transcribe', 3000);
-        }
-        const taskId = await submitTranscriptionJob(record.audioUrl);
-        await storeDoclingTaskId(id, taskId);
-        return { found: true, id, status: 'transcribing', stage: 'transcribe', error: null, retryAfterMs: 4000 };
+      if (!(await acquireLease(id, 'uploaded', LEASE_TRANSCRIBE_MS))) {
+        return waiting(id, 'uploaded', 'transcribe', 2000);
       }
-
-      if (record.submittedAt && Date.now() - record.submittedAt > TRANSCRIBE_DEADLINE_MS) {
-        throw new Error(
-          `Docling task ${record.doclingTaskId} did not finish within ${Math.round(TRANSCRIBE_DEADLINE_MS / 60000)} minutes.`,
-        );
-      }
-
-      // The result endpoint is single-use, so the whole branch is leased.
-      if (!(await acquireLease(id, 'transcribing', LEASE_TRANSCRIBE_MS))) {
-        return waiting(id, 'transcribing', 'transcribe', 3000);
-      }
-
-      const poll = await pollTranscriptionJob(record.doclingTaskId);
-
-      if (poll.state === 'pending') {
-        await releaseLease(id);
-        return {
-          found: true, id, status: 'transcribing', stage: 'transcribe', error: null,
-          retryAfterMs: poll.retryAfterMs ?? 4000,
-        };
-      }
-
-      if (poll.state === 'failed') {
-        throw new DoclingError('task_failed', poll.message ?? 'Docling transcription failed', {
-          retryable: poll.retryable,
-          taskId: record.doclingTaskId,
-        });
-      }
-
-      // Succeeded: fetch once and persist in the same request.
-      const markdown = await fetchTranscriptionResult(record.doclingTaskId);
+      const markdown = await transcribeAudio(record.audioUrl);
       await storeTranscript(id, markdown);
       console.log(`[pipeline] ${id} transcript stored (${markdown.length} chars)`);
       return { found: true, id, status: 'enriching', stage: 'enrich', error: null, retryAfterMs: 1000 };
@@ -210,12 +160,12 @@ async function handleFailure(
 }
 
 /**
- * Whether the job is worth another tick. Docling classifies its own errors; on
- * top of that, anything that looks like a timed-out or refused network call is
- * retryable, because the audio and the Docling task both still exist.
+ * Whether the job is worth another tick. TranscriptionError carries an explicit
+ * retryable flag; on top of that, anything that looks like a timed-out or
+ * refused network call is retryable because the audio still exists in storage.
  */
 function isRetryable(err: unknown): boolean {
-  if (err instanceof DoclingError) return err.retryable;
+  if (err instanceof TranscriptionError) return err.retryable;
   if (!(err instanceof Error)) return false;
 
   // AbortSignal.timeout, undici socket errors, and the Astra driver's own
@@ -235,7 +185,7 @@ function waiting(id: string, status: RecordingStatus, stage: PipelineStage, retr
 
 /** Keeps the provider's own diagnostics — the reason a job failed is almost always in them. */
 function describe(err: unknown): string {
-  if (err instanceof DoclingError) return `[${err.code}] ${err.message}`;
+  if (err instanceof TranscriptionError) return `[${err.code}] ${err.message}`;
   if (err instanceof Error) return err.message;
   return String(err);
 }
