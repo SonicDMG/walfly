@@ -7,8 +7,8 @@
     "packages/*"
   ],
   "scripts": {
-    "dev": "concurrently -n api,mobile -c blue,green \"npm run dev --workspace=packages/api\" \"npm run dev --workspace=apps/mobile\"",
-    "dev:api": "npm run dev --workspace=packages/api",
+    "dev": "concurrently -n sidecar,api,mobile -c magenta,blue,green \"uv run --project packages/api/sidecar python packages/api/sidecar/transcribe_sidecar.py\" \"npm run dev --workspace=packages/api\" \"npm run dev --workspace=apps/mobile\"",
+    "dev:api": "concurrently -n sidecar,api -c magenta,blue \"uv run --project packages/api/sidecar python packages/api/sidecar/transcribe_sidecar.py\" \"npm run dev --workspace=packages/api\"",
     "dev:mobile": "npm run dev --workspace=apps/mobile",
     "build": "npm run build --workspace=packages/db && npm run build --workspace=packages/api && npm run build --workspace=apps/mobile",
     "build:api": "npm run build --workspace=packages/api",

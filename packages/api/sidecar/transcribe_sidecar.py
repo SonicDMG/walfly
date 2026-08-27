@@ -329,6 +329,6 @@ def get_result(task_id: str) -> JSONResponse:
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    port = int(os.environ.get("SIDECAR_PORT", "5002"))
+    port = int(os.environ.get("SIDECAR_PORT", "8888"))
     log.info("Starting transcription sidecar on port %d", port)
     uvicorn.run(app, host="0.0.0.0", port=port)
