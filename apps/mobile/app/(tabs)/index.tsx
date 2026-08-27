@@ -2,8 +2,13 @@
  * Tab 1 — Record Screen
  *
  * Large record button. Tap to start, tap again to stop.
- * Location permission is requested at tap-start — gracefully degrades if denied.
+ * Location is captured concurrently with the recording and never gates it, so
+ * the microphone is live within a moment of the tap.
  * Progress and wait states use react-native-progress for animated feedback.
+ *
+ * The pulse animation keeps `opacity` permanently bound to the Animated.Value —
+ * swapping between an animated node and a literal forces the native driver to
+ * detach and re-attach, which intermittently strands the button at low opacity.
  */
 
 import React, { useRef, useEffect } from 'react';
@@ -21,6 +26,9 @@ const RED = '#E53935';
 const DARK = '#1a1a1a';
 const MUTED = '#888';
 
+/** States in which taps are ignored and the button renders dimmed. */
+const BUSY_STATES = new Set<RecordState>(['uploading', 'processing', 'requesting']);
+
 export default function RecordScreen() {
   const { state, error, progress, startRecording, stopAndUpload, reset } =
     useRecordingUpload();
@@ -29,31 +37,45 @@ export default function RecordScreen() {
   const pulseAnim = useRef(new Animated.Value(1)).current;
 
   useEffect(() => {
-    if (state === 'recording') {
-      Animated.loop(
-        Animated.sequence([
-          Animated.timing(pulseAnim, { toValue: 0.55, duration: 600, useNativeDriver: true }),
-          Animated.timing(pulseAnim, { toValue: 1, duration: 600, useNativeDriver: true }),
-        ]),
-      ).start();
-    } else {
-      pulseAnim.stopAnimation();
-      pulseAnim.setValue(1);
+    if (state !== 'recording') {
+      // Dimming is expressed through the same Animated.Value rather than a
+      // second style entry, so the node is never swapped for a literal.
+      pulseAnim.setValue(BUSY_STATES.has(state) ? 0.5 : 1);
+      return;
     }
-  }, [state]);
+
+    const loop = Animated.loop(
+      Animated.sequence([
+        Animated.timing(pulseAnim, { toValue: 0.55, duration: 600, useNativeDriver: true }),
+        Animated.timing(pulseAnim, { toValue: 1, duration: 600, useNativeDriver: true }),
+      ]),
+    );
+    loop.start();
+
+    return () => {
+      loop.stop();
+      pulseAnim.setValue(1);
+    };
+  }, [state, pulseAnim]);
 
   function handlePress() {
+    if (state === 'recording') {
+      void stopAndUpload();
+      return;
+    }
     if (state === 'idle' || state === 'error' || state === 'done') {
-      if (state === 'error') reset();
-      startRecording();
-    } else if (state === 'recording') {
-      stopAndUpload();
+      void (async () => {
+        // reset() tears down any recorder left behind by a failed run before a
+        // new one can be prepared — expo-av allows only one at a time.
+        if (state === 'error' || state === 'done') await reset();
+        await startRecording();
+      })();
     }
     // 'uploading' / 'processing' / 'requesting' — ignore taps
   }
 
   const isActive = state === 'recording';
-  const isBusy = state === 'uploading' || state === 'processing' || state === 'requesting';
+  const isBusy = BUSY_STATES.has(state);
   const isDone = state === 'done';
 
   return (
@@ -76,8 +98,7 @@ export default function RecordScreen() {
             styles.button,
             isActive && styles.buttonActive,
             isDone && styles.buttonDone,
-            isBusy && styles.buttonBusy,
-            { opacity: isActive ? pulseAnim : 1 },
+            { opacity: pulseAnim },
           ]}
         >
         </Animated.View>
@@ -101,7 +122,7 @@ export default function RecordScreen() {
         </View>
       )}
 
-      {/* Spinner for requesting state */}
+      {/* Spinner shown while permissions are granted and the recorder prepares */}
       {state === 'requesting' && (
         <View style={styles.progressContainer}>
           <Progress.CircleSnail
@@ -109,7 +130,7 @@ export default function RecordScreen() {
             size={32}
             thickness={3}
           />
-          <Text style={styles.progressLabel}>Getting location…</Text>
+          <Text style={styles.progressLabel}>Starting…</Text>
         </View>
       )}
 
@@ -127,7 +148,7 @@ export default function RecordScreen() {
 function labelFor(state: RecordState): string {
   switch (state) {
     case 'idle': return 'Tap to record';
-    case 'requesting': return 'Getting location…';
+    case 'requesting': return 'Starting…';
     case 'recording': return 'Recording — tap to stop';
     case 'uploading': return 'Uploading…';
     case 'processing': return 'Processing…';
@@ -176,9 +197,6 @@ const styles = StyleSheet.create({
   },
   buttonDone: {
     backgroundColor: '#43A047',
-  },
-  buttonBusy: {
-    opacity: 0.5,
   },
   progressContainer: {
     alignItems: 'center',

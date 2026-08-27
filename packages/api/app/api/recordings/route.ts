@@ -1,86 +1,201 @@
 /**
  * GET /api/recordings
  *
- * Returns recordings sorted by date descending.
- * If ?q=<term> is provided, runs hybrid search:
- *   - Vector search: sort by $vectorize similarity to the query
- *   - Keyword search: filter on title, tags, notes, transcript containing the term
- * Results are merged, deduplicated by _id, and sorted by combined score.
+ * Lists recordings newest-first, or searches them when ?q= is present.
+ *
+ * Search has two paths because lexical/rerank are a region-limited Astra
+ * preview. When the collection has them, one findAndRerank call does BM25 +
+ * vector retrieval with an NVIDIA reranker. Everywhere else the portable path
+ * fuses a vector search with a `searchTokens: {$in: ...}` keyword search using
+ * Reciprocal Rank Fusion. `$regex`, `$options` and `$elemMatch` are NOT Astra
+ * operators and are deliberately absent — sending them fails the whole command.
+ *
+ * Every response is projected: full transcripts for 100 documents would trip
+ * the platform's 4.5 MB response cap.
  *
  * Query params:
- *   q       - optional search query string
- *   limit   - optional max results (default 50)
+ *   q       - optional search query
+ *   limit   - optional max results (default 50, hard max 100)
  */
 
 import { NextRequest, NextResponse } from 'next/server';
-import { getRecordingsCollection } from '@walfly/db';
-import type { Recording } from '@walfly/db';
+import {
+  clampVectorizeText,
+  getCollectionCapabilities,
+  getRecordingsCollection,
+  tokenizeQuery,
+} from '@walfly/db';
+import type { Recording, RecordingSummary } from '@walfly/db';
+
+export const runtime = 'nodejs';
 
 const DEFAULT_LIMIT = 50;
-const VECTOR_LIMIT = 20;
-const KEYWORD_LIMIT = 20;
+const MAX_LIMIT = 100;
+const RETRIEVAL_LIMIT = 20;
+/** Standard RRF damping constant; keeps a rank-1 hit from dominating outright. */
+const RRF_K = 60;
+
+const SUMMARY_PROJECTION = {
+  _id: 1,
+  title: 1,
+  createdAt: 1,
+  duration: 1,
+  status: 1,
+  tags: 1,
+  summary: 1,
+  location: 1,
+  audioUrl: 1,
+  audioContentType: 1,
+  error: 1,
+} as const;
+
+/** Strips everything the list screen does not render, transcripts above all. */
+function toSummary(doc: Recording): RecordingSummary {
+  return {
+    _id: doc._id,
+    title: doc.title ?? 'Untitled recording',
+    createdAt: doc.createdAt,
+    duration: typeof doc.duration === 'number' ? doc.duration : 0,
+    status: doc.status,
+    tags: Array.isArray(doc.tags) ? doc.tags : [],
+    summary: doc.summary ?? null,
+    location: doc.location ?? null,
+    audioUrl: doc.audioUrl,
+    audioContentType: doc.audioContentType ?? 'application/octet-stream',
+    error: doc.error ?? null,
+  };
+}
 
 export async function GET(req: NextRequest) {
   const { searchParams } = req.nextUrl;
   const q = searchParams.get('q')?.trim() ?? '';
-  const limit = Math.min(Number(searchParams.get('limit') ?? DEFAULT_LIMIT), 100);
 
-  const collection = getRecordingsCollection();
+  const rawLimit = Number(searchParams.get('limit'));
+  const limit = Number.isFinite(rawLimit) && rawLimit > 0 ? Math.min(rawLimit, MAX_LIMIT) : DEFAULT_LIMIT;
 
-  if (!q) {
-    // No query — return all recordings sorted by date descending
-    const cursor = collection.find({}, { sort: { createdAt: -1 }, limit });
-    const results = await cursor.toArray();
-    return NextResponse.json(results);
+  try {
+    // Inside the try: getRecordingsCollection() performs the env check, and an
+    // uncaught throw here would be an empty-bodied 500 on the single most
+    // common setup mistake.
+    const collection = getRecordingsCollection();
+
+    if (!q) {
+      // In-memory sort on an indexed field: fine below ~10k documents.
+      const docs = await collection
+        .find({}, { sort: { createdAt: -1 }, limit, projection: SUMMARY_PROJECTION })
+        .toArray();
+      return NextResponse.json(docs.map((d) => toSummary(d as unknown as Recording)));
+    }
+
+    // The 512-token cap on nv-embedqa-e5-v5 applies to QUERY strings too: an
+    // over-long sort value is rejected by the provider and fails the command.
+    const vectorQuery = clampVectorizeText(q);
+
+    const capabilities = await getCollectionCapabilities();
+
+    if (capabilities.lexical && capabilities.rerank) {
+      // No projection here: the server reranks on $lexical, so the fields are
+      // stripped in JS afterwards instead.
+      const rows = await collection
+        .findAndRerank(
+          { status: 'ready' },
+          { sort: { $hybrid: vectorQuery }, hybridLimits: { $vector: RETRIEVAL_LIMIT, $lexical: RETRIEVAL_LIMIT }, limit },
+        )
+        .toArray();
+
+      return NextResponse.json(rows.map((r) => toSummary(r.document as unknown as Recording)));
+    }
+
+    return NextResponse.json(await portableSearch(collection, q, vectorQuery, limit));
+  } catch (err) {
+    logDataApiError('search', err);
+    return NextResponse.json(
+      { error: err instanceof Error ? err.message : 'Failed to list recordings' },
+      { status: 500 },
+    );
   }
+}
 
-  // Hybrid search: run vector + keyword in parallel
-  const [vectorResults, keywordResults] = await Promise.all([
-    // Vector search — Astra auto-embeds the query via $vectorize
-    collection
-      .find({}, { sort: { $vectorize: q }, limit: VECTOR_LIMIT, includeSimilarity: true })
-      .toArray(),
+/**
+ * Vector search fused with a token search via Reciprocal Rank Fusion. Works in
+ * every Astra region because it uses only universally supported operators.
+ */
+async function portableSearch(
+  collection: ReturnType<typeof getRecordingsCollection>,
+  q: string,
+  vectorQuery: string,
+  limit: number,
+): Promise<RecordingSummary[]> {
+  const tokens = tokenizeQuery(q);
 
-    // Keyword search — case-insensitive regex across text fields
-    // Cast filter to unknown: Astra TS types don't expose $regex/$elemMatch
-    // but the underlying API supports them.
+  const [vecR, kwR] = await Promise.allSettled([
     collection
       .find(
-        {
-          $or: [
-            { title: { $regex: q, $options: 'i' } },
-            { notes: { $regex: q, $options: 'i' } },
-            { transcript: { $regex: q, $options: 'i' } },
-            { tags: { $elemMatch: { $regex: q, $options: 'i' } } },
-          ],
-        } as unknown as Parameters<typeof collection.find>[0],
-        { limit: KEYWORD_LIMIT },
+        { status: 'ready' },
+        { sort: { $vectorize: vectorQuery }, limit: RETRIEVAL_LIMIT, includeSimilarity: true, projection: SUMMARY_PROJECTION },
       )
       .toArray(),
+    tokens.length
+      ? collection
+          .find(
+            // "contains any of these tokens", expressed with operators Astra
+            // supports in every region. Each $all holds a single element, so
+            // the clause reads as array-contains rather than array-equals.
+            { status: 'ready', $or: tokens.map((token) => ({ searchTokens: { $all: [token] } })) },
+            { limit: RETRIEVAL_LIMIT, projection: SUMMARY_PROJECTION },
+          )
+          .toArray()
+      : Promise.resolve([]),
   ]);
 
-  // Merge and deduplicate
-  // Vector results carry a $similarity score (0-1); keyword hits get a fixed boost of 0.5
-  const scoreMap = new Map<string, { doc: Recording; score: number }>();
+  if (vecR.status === 'rejected') logDataApiError('vector search', vecR.reason);
+  if (kwR.status === 'rejected') logDataApiError('token search', kwR.reason);
 
-  for (const doc of vectorResults) {
-    const sim = (doc as Recording & { $similarity?: number }).$similarity ?? 0;
-    scoreMap.set(doc._id, { doc, score: sim });
+  if (vecR.status === 'rejected' && kwR.status === 'rejected') {
+    throw vecR.reason;
   }
 
-  for (const doc of keywordResults) {
-    const existing = scoreMap.get(doc._id);
-    if (existing) {
-      existing.score += 0.5; // boost for appearing in both
-    } else {
-      scoreMap.set(doc._id, { doc, score: 0.5 });
-    }
-  }
+  const vectorHits = vecR.status === 'fulfilled' ? (vecR.value as unknown as Recording[]) : [];
+  const keywordHits = kwR.status === 'fulfilled' ? (kwR.value as unknown as Recording[]) : [];
 
-  const merged = Array.from(scoreMap.values())
-    .sort((a, b) => b.score - a.score)
+  const scored = new Map<string, { doc: Recording; score: number }>();
+
+  const fuse = (docs: Recording[]) => {
+    docs.forEach((doc, index) => {
+      const existing = scored.get(doc._id);
+      const contribution = 1 / (RRF_K + index + 1);
+      if (existing) {
+        existing.score += contribution;
+      } else {
+        scored.set(doc._id, { doc, score: contribution });
+      }
+    });
+  };
+
+  fuse(vectorHits);
+  fuse(keywordHits);
+
+  return Array.from(scored.values())
+    .sort((a, b) => {
+      if (b.score !== a.score) return b.score - a.score;
+      // Deterministic tie-break so identical scores never reorder per request.
+      return (b.doc.createdAt ?? '').localeCompare(a.doc.createdAt ?? '');
+    })
     .slice(0, limit)
-    .map(({ doc }) => doc);
+    .map(({ doc }) => toSummary(doc));
+}
 
-  return NextResponse.json(merged);
+/** Surfaces the Data API's own error code, which names the real problem. */
+function logDataApiError(phase: string, err: unknown): void {
+  const descriptors = (err as { errorDescriptors?: Array<{ errorCode?: string; message?: string }> })
+    ?.errorDescriptors;
+  const code = descriptors?.[0]?.errorCode;
+  console.error(
+    `[recordings] ${phase} failed${code ? ` (${code})` : ''}:`,
+    err instanceof Error ? err.message : err,
+  );
+}
+
+export async function OPTIONS(): Promise<Response> {
+  return new Response(null, { status: 204 });
 }

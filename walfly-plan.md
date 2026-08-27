@@ -1,5 +1,15 @@
 # Walfly — Plan
 
+> **Superseded decisions.** This is the original planning document. The
+> recording/transcription stack was rewritten afterwards and the following
+> decisions no longer hold: transcription returns timestamped markdown, not SRT;
+> the pipeline is a client-driven resumable state machine, not a background job
+> kicked off by the upload route; chat is stateless and has no `conversationId`;
+> `$vectorize` receives a bounded title/summary blob, never the transcript; the
+> collection is created without `defaultId` so `_id` stays a string. The stack
+> list, the schema block and the decisions table below have been corrected. The
+> per-ticket todo lists are left as written and are historical.
+
 ## Overview
 
 Walfly ("fly on the wall") is a passive conversation recorder. Users tap to record, stop, and the system automatically transcribes, vectorizes, and enriches the recording with metadata. Recordings are searchable and browsable via a multi-tab UI. Users can also chat with their recordings in real-time — per-recording or across all recordings globally.
@@ -8,11 +18,11 @@ Walfly ("fly on the wall") is a passive conversation recorder. Users tap to reco
 - Frontend: Expo (web first, then iOS/Android, then Apple Watch)
 - API: Next.js API Routes (deployed on Vercel)
 - Audio storage: Vercel Blob Storage
-- Transcription: Docling SaaS (SRT output; diarization post-MVP)
+- Transcription: Docling SaaS in the cloud — audio is uploaded as multipart to `/v1/convert/file/async`, which returns timestamped markdown (diarization post-MVP)
 - DB + Vector store: Astra DB (DataStax)
 - LLM gateway: LiteLLM or OpenRouter proxy (OpenAI-API-compatible; swap any model without code changes)
 - LLM model (default): OpenAI GPT-4o via the proxy
-- LLM APIs used: OpenAI Responses API + Conversations API; all responses streamed via SSE
+- LLM APIs used: OpenAI-compatible Chat Completions; chat responses streamed via SSE. The server is stateless — the client owns and sends the history
 - Location: Browser Geolocation API (web) / expo-location (mobile), reverse-geocoded to human-readable + raw coords stored
 - Auth: None (MVP, single-user; multi-user post-MVP)
 
@@ -81,24 +91,27 @@ walfly/
      title: string (editable)
      createdAt: ISO timestamp
      duration: number (seconds)
-     audioUrl: string (Vercel Blob URL)
+     audioUrl: string (Vercel Blob URL, or /api/recordings/audio/<name> in local dev)
+     audioContentType: string (the container actually stored)
      location: {
        coords: { lat, lng }
        placeName: string
      }
-     status: "processing" | "ready" | "error"
-     transcript: string (full SRT text)
+     status: "uploaded" | "transcribing" | "enriching" | "ready" | "failed"
+     doclingTaskId / submittedAt / leaseUntil / failedStage / error (pipeline state)
+     transcript: string (timestamped markdown from Docling ASR — not SRT)
      summary: string
      keyTakeaways: string[]
      actionItems: string[]
      speakers: string[] (diarization labels)
      tags: string[] (editable)
      notes: string (editable freeform)
-     $vector: float[] (auto-populated by Astra vectorize)
+     searchTokens: string[] (portable keyword fallback)
+     $vectorize: string (bounded title/summary blob — never the transcript)
    }
    ```
 2. Create `packages/db/src/collections.ts` — exports `getRecordingsCollection()` using Astra DB client
-3. Create `packages/db/src/seed-schema.ts` — script that creates the `recordings` collection with `defaultId: "uuid"` and vectorize config (text embedding model via Astra's built-in vectorize)
+3. Create `packages/db/src/seed-schema.ts` — script that creates the `recordings` collection with NVIDIA vectorize and an indexing deny-list, and with NO `defaultId` so `_id` stays a string
 4. Export TypeScript `Recording` type from `packages/db/src/types.ts`
 5. Run seed script against real Astra DB and confirm collection exists
 
@@ -124,6 +137,8 @@ walfly/
    - Insert `Recording` doc into Astra DB with `status: "processing"`
    - Return `{ id, status }` immediately
    - Kick off async enrichment (use `waitUntil` from Vercel if available, or fire-and-forget)
+   - **Superseded:** the upload route starts no work at all. The client drives the
+     pipeline by POSTing `/api/recordings/{id}/process`, one awaited step per call.
 2. Create `packages/api/lib/transcribe.ts`:
    - POST audio URL to Docling SaaS API
    - Poll or await response (SRT format)
@@ -302,6 +317,8 @@ walfly/
    - If no `recordingId` (global): run Astra vector search using the user message, pull top-N transcript chunks as context
    - Build system prompt with injected context (RAG)
    - Call LLM proxy using Conversations API (maintain thread via `conversationId`)
+   - **Superseded:** `conversationId` does not exist. `POST /api/chat` takes
+     `{ messages, recordingId? }` and is stateless.
    - Stream response back using `ReadableStream` / `TransformStream` (Vercel Edge compatible)
    - Return `conversationId` in first chunk so client can persist thread continuity
 4. Build `useChat` hook in the Expo app:
@@ -343,18 +360,18 @@ walfly/
 
 | Question | Decision |
 |---|---|
-| Transcription service | Docling SaaS (SRT output) |
+| Transcription service | Docling SaaS in the cloud (timestamped markdown; bytes always uploaded as multipart) |
 | Diarization | Post-MVP — transcript stored without speaker labels |
 | DB | Astra DB with built-in vectorize |
 | Audio blob storage | Vercel Blob |
 | API framework | Next.js API Routes on Vercel |
 | LLM gateway | LiteLLM or OpenRouter proxy (OpenAI-API-compatible) |
 | LLM model default | GPT-4o via proxy |
-| LLM APIs | OpenAI Responses API + Conversations API, all streaming |
+| LLM APIs | OpenAI-compatible Chat Completions, streaming; stateless server, client-held history |
 | LLM model swappability | Via env vars LLM_BASE_URL / LLM_API_KEY / LLM_MODEL |
 | Chat scope | Per-recording (from detail screen) + global cross-recording (Tab 3) |
-| Chat RAG | Astra vector search injects relevant transcript chunks as LLM context |
+| Chat RAG | Per-recording: that transcript, truncated. Global: Astra vector search injects titles/summaries/takeaways only |
 | Auth | None for MVP |
-| Search mode | Always hybrid, auto-merged results |
+| Search mode | Hybrid (lexical + rerank) where the Astra region supports it, otherwise vector + `searchTokens` fused with RRF |
 | Location | Reverse-geocoded human name + raw coords |
 | Apple Watch | Post-MVP (ST-9) |

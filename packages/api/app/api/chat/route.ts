@@ -1,106 +1,124 @@
 /**
  * POST /api/chat
  *
- * Streaming chat endpoint. Accepts:
- *   { message: string, conversationId?: string, recordingId?: string }
+ * Streaming chat over the user's recordings. The server is stateless: the
+ * client owns the conversation and sends the whole history on every turn, so
+ * there is no conversation id anywhere in this codebase.
  *
- * - If recordingId: fetch that recording's transcript as context (per-recording RAG)
- * - If no recordingId: vector-search Astra for top-5 relevant transcript chunks (global RAG)
- * - Maintains conversation history via OpenAI thread (previous_response_id pattern)
- * - Streams tokens back as plain text/event-stream (SSE)
- * - First event contains the conversationId so the client can persist it
+ * Retrieval has two modes. With a recordingId the transcript of that one
+ * recording is injected, truncated to a fixed character budget. Without one,
+ * Astra vector search returns the most relevant recordings and only their
+ * titles, summaries and key takeaways are injected — never raw transcripts,
+ * which would blow past any proxy's context window.
+ *
+ * Everything that can fail is resolved BEFORE the stream opens, so a retrieval
+ * error is an honest JSON 500 rather than an error event behind a 200.
  */
 
-import { NextRequest } from 'next/server';
-import { getRecordingsCollection } from '@walfly/db';
-import { llmClient, getLlmModel } from '@/lib/llm';
+import { NextRequest, NextResponse } from 'next/server';
+import { clampVectorizeText, getRecordingsCollection } from '@walfly/db';
+import type { Recording } from '@walfly/db';
+import { getLlmModel, llmClient } from '@/lib/llm';
 
 export const runtime = 'nodejs';
+export const maxDuration = 300;
+
+interface ChatMessage {
+  role: 'user' | 'assistant';
+  content: string;
+}
 
 interface ChatRequest {
-  message: string;
-  conversationId?: string;
+  messages: ChatMessage[];
   recordingId?: string;
 }
 
-const CONTEXT_CHUNKS = 5;
+const CONTEXT_RECORDINGS = 5;
+/** Below this cosine similarity a recording is noise, not context. */
+const MIN_SIMILARITY = 0.55;
+const CHAT_TRANSCRIPT_MAX_CHARS = 24_000;
+/** Newest turns only; the whole history would grow without bound. */
+const MAX_HISTORY_MESSAGES = 20;
 
 export async function POST(req: NextRequest) {
   let body: ChatRequest;
   try {
     body = (await req.json()) as ChatRequest;
   } catch {
-    return new Response('Invalid JSON', { status: 400 });
+    return NextResponse.json({ error: 'Invalid JSON body' }, { status: 400 });
   }
 
-  const { message, conversationId, recordingId } = body;
-  if (!message?.trim()) {
-    return new Response('Missing message', { status: 400 });
+  const messages = Array.isArray(body?.messages) ? body.messages : null;
+  if (!messages || messages.length === 0) {
+    return NextResponse.json({ error: '`messages` must be a non-empty array' }, { status: 400 });
   }
 
-  // --- Build RAG context ---
-  let contextText = '';
-  const collection = getRecordingsCollection();
-
-  if (recordingId) {
-    // Per-recording: inject full transcript
-    const rec = await collection.findOne({ _id: recordingId });
-    if (rec?.transcript) {
-      contextText = `Recording: "${rec.title}" (${new Date(rec.createdAt).toLocaleDateString()})\n\n${rec.transcript}`;
+  const history: ChatMessage[] = [];
+  for (const message of messages) {
+    if (!message || typeof message.content !== 'string') {
+      return NextResponse.json({ error: 'Each message needs a string `content`' }, { status: 400 });
     }
-  } else {
-    // Global: vector search top-N relevant recordings
-    const results = await collection
-      .find({}, { sort: { $vectorize: message }, limit: CONTEXT_CHUNKS })
-      .toArray();
-    if (results.length > 0) {
-      contextText = results
-        .map((r) => `Recording: "${r.title}" (${new Date(r.createdAt).toLocaleDateString()})\n${r.transcript ?? r.summary ?? ''}`)
-        .join('\n\n---\n\n');
+    if (message.role !== 'user' && message.role !== 'assistant') {
+      return NextResponse.json({ error: 'Each message role must be "user" or "assistant"' }, { status: 400 });
     }
+    if (message.content.trim()) history.push({ role: message.role, content: message.content });
   }
 
-  const systemPrompt = contextText
-    ? `You are a helpful assistant with access to the user's recorded conversations. Answer questions based on the provided transcripts.\n\nContext:\n${contextText}`
-    : `You are a helpful assistant for the Walfly app. The user has recorded conversations but none are relevant to this question.`;
+  const lastUserMessage = [...history].reverse().find((m) => m.role === 'user')?.content.trim();
+  if (!lastUserMessage) {
+    return NextResponse.json({ error: 'No user message to answer' }, { status: 400 });
+  }
 
-  // --- Stream from LLM ---
-  const client = llmClient();
-  const model = getLlmModel();
+  let systemPrompt: string;
+  try {
+    systemPrompt = await buildSystemPrompt(lastUserMessage, body.recordingId);
+  } catch (err) {
+    console.error('[chat] retrieval failed:', err instanceof Error ? err.message : err);
+    return NextResponse.json(
+      { error: err instanceof Error ? err.message : 'Failed to load recording context' },
+      { status: 500 },
+    );
+  }
 
-  const stream = new ReadableStream({
+  let client: ReturnType<typeof llmClient>;
+  let model: string;
+  try {
+    client = llmClient();
+    model = getLlmModel();
+  } catch (err) {
+    return NextResponse.json(
+      { error: err instanceof Error ? err.message : 'LLM is not configured' },
+      { status: 500 },
+    );
+  }
+
+  const stream = new ReadableStream<Uint8Array>({
     async start(controller) {
       const enc = new TextEncoder();
-
-      // Send conversationId as first SSE event so client can store it
-      const newConversationId = conversationId ?? crypto.randomUUID();
-      controller.enqueue(enc.encode(`data: ${JSON.stringify({ conversationId: newConversationId })}\n\n`));
+      const send = (payload: unknown) =>
+        controller.enqueue(enc.encode(`data: ${JSON.stringify(payload)}\n\n`));
 
       try {
-        const messages: { role: 'system' | 'user'; content: string }[] = [
-          { role: 'system', content: systemPrompt },
-          { role: 'user', content: message },
-        ];
-
         const completion = await client.chat.completions.create({
           model,
-          messages,
+          messages: [
+            { role: 'system', content: systemPrompt },
+            ...history.slice(-MAX_HISTORY_MESSAGES),
+          ],
           stream: true,
           temperature: 0.7,
         });
 
         for await (const chunk of completion) {
           const token = chunk.choices[0]?.delta?.content ?? '';
-          if (token) {
-            controller.enqueue(enc.encode(`data: ${JSON.stringify({ token })}\n\n`));
-          }
+          if (token) send({ token });
         }
-
-        controller.enqueue(enc.encode('data: [DONE]\n\n'));
       } catch (err) {
-        const msg = err instanceof Error ? err.message : 'LLM error';
-        controller.enqueue(enc.encode(`data: ${JSON.stringify({ error: msg })}\n\n`));
+        send({ error: err instanceof Error ? err.message : 'LLM request failed' });
       } finally {
+        // [DONE] is emitted on both paths so a client that terminates on the
+        // sentinel never hangs.
+        controller.enqueue(enc.encode('data: [DONE]\n\n'));
         controller.close();
       }
     },
@@ -108,9 +126,97 @@ export async function POST(req: NextRequest) {
 
   return new Response(stream, {
     headers: {
-      'Content-Type': 'text/event-stream',
-      'Cache-Control': 'no-cache',
-      Connection: 'keep-alive',
+      'Content-Type': 'text/event-stream; charset=utf-8',
+      'Cache-Control': 'no-cache, no-transform',
+      // Stops nginx-style intermediaries buffering the whole stream to the end.
+      'X-Accel-Buffering': 'no',
     },
   });
+}
+
+/** Builds the grounded system prompt, or a truthful ungrounded one. */
+async function buildSystemPrompt(question: string, recordingId?: string): Promise<string> {
+  const collection = getRecordingsCollection();
+
+  if (recordingId) {
+    const rec = await collection.findOne({ _id: recordingId });
+    if (!rec) {
+      return 'You are the assistant for the Walfly app. The recording the user is asking about no longer exists; say so plainly.';
+    }
+
+    const transcript = (rec.transcript ?? '').slice(0, CHAT_TRANSCRIPT_MAX_CHARS);
+    const truncated = (rec.transcript ?? '').length > CHAT_TRANSCRIPT_MAX_CHARS;
+
+    if (!transcript.trim()) {
+      return [
+        'You are the assistant for the Walfly app.',
+        `The recording "${rec.title}" has no transcript yet (status: ${rec.status}).`,
+        'Tell the user it is still being processed, or failed, and do not invent its contents.',
+      ].join(' ');
+    }
+
+    return [
+      "You are a helpful assistant with access to the user's recorded conversations.",
+      'Answer only from the transcript below. If it does not contain the answer, say so.',
+      '',
+      `Recording: "${rec.title}" (${formatDate(rec.createdAt)})`,
+      '',
+      transcript,
+      truncated ? '\n[transcript truncated]' : '',
+    ]
+      .filter(Boolean)
+      .join('\n');
+  }
+
+  const results = await collection
+    .find(
+      { status: 'ready' },
+      {
+        // Clamped: the embedding provider hard-caps input at 512 tokens and
+        // rejects the whole find() when a longer query is sent.
+        sort: { $vectorize: clampVectorizeText(question) },
+        limit: CONTEXT_RECORDINGS,
+        includeSimilarity: true,
+        projection: { title: 1, createdAt: 1, summary: 1, keyTakeaways: 1 },
+      },
+    )
+    .toArray();
+
+  const relevant = (results as unknown as Array<Recording & { $similarity?: number }>).filter(
+    (r) => (r.$similarity ?? 0) >= MIN_SIMILARITY,
+  );
+
+  if (relevant.length === 0) {
+    return 'You are the assistant for the Walfly app. None of the user\'s recordings are relevant to this question. Say so, and answer generally only if that is useful.';
+  }
+
+  const context = relevant
+    .map((r) => {
+      const takeaways = Array.isArray(r.keyTakeaways) ? r.keyTakeaways : [];
+      return [
+        `Recording: "${r.title}" (${formatDate(r.createdAt)})`,
+        r.summary ? `Summary: ${r.summary}` : null,
+        takeaways.length ? `Key takeaways:\n${takeaways.map((t) => `- ${t}`).join('\n')}` : null,
+      ]
+        .filter(Boolean)
+        .join('\n');
+    })
+    .join('\n\n---\n\n');
+
+  return [
+    "You are a helpful assistant with access to summaries of the user's recorded conversations.",
+    'Answer from the context below. It contains summaries, not full transcripts, so say when a detail is not available.',
+    '',
+    'Context:',
+    context,
+  ].join('\n');
+}
+
+function formatDate(iso: string): string {
+  const date = new Date(iso);
+  return Number.isNaN(date.getTime()) ? 'unknown date' : date.toISOString().slice(0, 10);
+}
+
+export async function OPTIONS(): Promise<Response> {
+  return new Response(null, { status: 204 });
 }

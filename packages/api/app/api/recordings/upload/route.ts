@@ -1,32 +1,74 @@
 /**
- * POST /api/recordings/upload
+ * /api/recordings/upload
  *
- * Accepts a multipart/form-data upload with:
- *   audio          - audio file blob
- *   duration       - recording duration in seconds (string)
- *   clientTimestamp - ISO timestamp from the client at record-start
- *   lat            - latitude (optional, string)
- *   lng            - longitude (optional, string)
- *   placeName      - reverse-geocoded place name (optional, string)
+ * GET  — reports the upload limits and accepted MIME types to the client.
+ * POST — multipart/form-data: stores the audio and inserts the Recording
+ *        document with status "uploaded".
  *
- * Flow:
- *   1. Store audio (Vercel Blob if BLOB_READ_WRITE_TOKEN is set, else local tmpdir)
- *   2. Insert Recording doc into Astra DB with status "processing"
- *   3. Return { id, status } immediately
- *   4. Fire-and-forget: kick off enrichment pipeline
+ * The bytes are authoritative. The client's filename and declared MIME type are
+ * only diagnostics: the container is identified from magic bytes here, because
+ * relabelling a Blob transcodes nothing and a WebM upload can never reach
+ * Docling's ASR pipeline no matter what it claims to be.
+ *
+ * This route deliberately starts NO work. There is no detached promise and no
+ * after() anywhere in this codebase — the client drives the pipeline by POSTing
+ * /api/recordings/{id}/process, so every unit of work is a short, fully awaited
+ * request that behaves identically in `next dev` and on Vercel.
  */
 
 import { NextRequest, NextResponse } from 'next/server';
-import { getRecordingsCollection } from '@walfly/db';
-import { enrichRecording } from '@/lib/pipeline';
-import { storeAudio } from '@/lib/storage';
-import { v4 as uuidv4 } from 'uuid';
+import {
+  ACCEPTED_UPLOAD_MIME_TYPES,
+  DoclingError,
+  normalizeAudioForAsr,
+  sniffAudioContainer,
+  type NormalizedAudio,
+} from '@/lib/docling';
+import { deleteAudio, storageMode, storeAudio } from '@/lib/storage';
+import { createRecording } from '@/lib/store';
 
 export const runtime = 'nodejs';
+export const maxDuration = 60;
 
-export async function POST(req: NextRequest) {
-  console.log('[upload] Incoming request — content-type:', req.headers.get('content-type'));
+/**
+ * Vercel rejects a larger request body at the routing layer, before this
+ * handler runs, with an HTML 413. That is a platform limit on the request — not
+ * a storage limit — so it applies whenever we are deployed there, regardless of
+ * where the bytes end up. A local server has no such cap, and needs the
+ * headroom: browsers that can only record WebM upload 16 kHz mono WAV instead,
+ * which is uncompressed at ~32 KB/s against Opus's ~4 KB/s.
+ */
+function maxUploadBytes(): number {
+  return process.env.VERCEL ? 4_000_000 : 100_000_000;
+}
 
+interface UploadCapabilities {
+  maxUploadBytes: number;
+  storage: 'blob' | 'local';
+  acceptedMimeTypes: string[];
+}
+
+interface UploadResponse {
+  id: string;
+  status: 'uploaded';
+  audioUrl: string;
+  audioContentType: string;
+}
+
+interface ApiError {
+  error: string;
+  code?: string;
+}
+
+export async function GET(): Promise<NextResponse<UploadCapabilities>> {
+  return NextResponse.json({
+    maxUploadBytes: maxUploadBytes(),
+    storage: storageMode(),
+    acceptedMimeTypes: ACCEPTED_UPLOAD_MIME_TYPES,
+  });
+}
+
+export async function POST(req: NextRequest): Promise<NextResponse<UploadResponse | ApiError>> {
   let formData: FormData;
   try {
     formData = await req.formData();
@@ -35,75 +77,118 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'Invalid multipart/form-data' }, { status: 400 });
   }
 
-  console.log('[upload] Form fields received:', [...formData.keys()]);
-
   const audioFile = formData.get('audio');
   if (!audioFile || !(audioFile instanceof Blob)) {
-    console.error('[upload] Missing or invalid audio field — got:', typeof audioFile, audioFile?.constructor?.name);
     return NextResponse.json({ error: 'Missing audio field' }, { status: 400 });
   }
 
-  console.log('[upload] Audio file — type:', (audioFile as File).type, 'size:', audioFile.size, 'bytes');
+  const declaredMime = String(formData.get('audioMimeType') ?? '') || (audioFile as File).type || '';
+  const uploadedName = (audioFile as File).name || 'recording';
 
-  const duration = Number(formData.get('duration') ?? '0');
-  const clientTimestamp = (formData.get('clientTimestamp') as string | null) ?? new Date().toISOString();
-  const lat = formData.get('lat') ? Number(formData.get('lat')) : null;
-  const lng = formData.get('lng') ? Number(formData.get('lng')) : null;
-  const placeName = (formData.get('placeName') as string | null) ?? null;
+  const bytes = new Uint8Array(await audioFile.arrayBuffer());
 
-  const id = uuidv4();
-  // Use the extension from the uploaded file so storage and transcription
-  // see the correct format (.mp4 from web, .m4a from native).
-  const uploadedName = (audioFile as File).name ?? 'recording.m4a';
-  const ext = uploadedName.includes('.') ? uploadedName.split('.').pop() : 'm4a';
-  const filename = `recordings/${id}.${ext}`;
-
-  // 1. Store audio
-  let audioUrl: string;
-  try {
-    audioUrl = await storeAudio(filename, audioFile);
-  } catch (err) {
-    console.error('[upload] Audio storage failed:', err);
-    return NextResponse.json({ error: 'Audio upload failed' }, { status: 500 });
+  if (bytes.byteLength === 0) {
+    return NextResponse.json({ error: 'The uploaded audio is empty' }, { status: 400 });
+  }
+  const limit = maxUploadBytes();
+  if (bytes.byteLength > limit) {
+    // Returned explicitly so the client never has to parse Vercel's HTML 413.
+    return NextResponse.json(
+      {
+        error: `Audio exceeds the ${(limit / 1e6).toFixed(1)} MB upload limit (${(
+          bytes.byteLength / 1e6
+        ).toFixed(1)} MB). Record a shorter walk.`,
+        code: 'payload_too_large',
+      },
+      { status: 413 },
+    );
   }
 
-  // 2. Insert recording doc into Astra DB
-  const collection = getRecordingsCollection();
+  const container = sniffAudioContainer(bytes);
+  console.log(
+    `[upload] declared=${declaredMime || 'none'} sniffed=${container?.mime ?? 'unknown'} bytes=${bytes.byteLength}`,
+  );
+
+  let normalized: NormalizedAudio;
   try {
-    await collection.insertOne({
-      _id: id,
-      title: `Recording ${new Date(clientTimestamp).toLocaleString()}`,
+    normalized = normalizeAudioForAsr(bytes, uploadedName);
+  } catch (err) {
+    if (err instanceof DoclingError && err.code === 'unsupported_media') {
+      return NextResponse.json({ error: err.message, code: err.code }, { status: 415 });
+    }
+    console.error('[upload] Audio validation failed:', err);
+    return NextResponse.json({ error: 'Could not validate the uploaded audio' }, { status: 500 });
+  }
+
+  const duration = Math.max(0, Math.round(Number(formData.get('duration') ?? '0')) || 0);
+  const clientTimestamp = readIsoTimestamp(formData.get('clientTimestamp'));
+  const lat = readCoordinate(formData.get('lat'));
+  const lng = readCoordinate(formData.get('lng'));
+  const placeNameRaw = formData.get('placeName');
+  const placeName = typeof placeNameRaw === 'string' && placeNameRaw.trim() ? placeNameRaw.trim() : null;
+
+  const id = crypto.randomUUID();
+
+  let stored: Awaited<ReturnType<typeof storeAudio>>;
+  try {
+    stored = await storeAudio(`recordings/${id}.${normalized.ext}`, normalized.bytes, normalized.mime);
+  } catch (err) {
+    console.error('[upload] Audio storage failed:', err);
+    return NextResponse.json(
+      { error: err instanceof Error ? err.message : 'Audio storage failed' },
+      { status: 500 },
+    );
+  }
+
+  try {
+    await createRecording({
+      id,
       createdAt: clientTimestamp,
       duration,
-      audioUrl,
-      location:
-        lat !== null && lng !== null
-          ? { coords: { lat, lng }, placeName }
-          : null,
-      status: 'processing',
-      transcript: null,
-      summary: null,
-      keyTakeaways: [],
-      actionItems: [],
-      speakers: [],
-      tags: [],
-      notes: '',
+      audioUrl: stored.url,
+      audioContentType: stored.contentType,
+      lat,
+      lng,
+      placeName,
     });
   } catch (err) {
     console.error('[upload] Astra DB insert failed:', err);
-    return NextResponse.json({ error: 'Database insert failed' }, { status: 500 });
+    // The bytes are already stored but nothing references them, and DELETE
+    // /api/recordings/{id} — the only other caller of deleteAudio — needs a
+    // document that was never created. In Blob mode this would otherwise be a
+    // billed object no code path can ever remove.
+    await deleteAudio(stored.url).catch((cleanupErr: unknown) => {
+      console.warn(`[upload] could not remove the orphaned audio at ${stored.url}:`, cleanupErr);
+    });
+    return NextResponse.json(
+      { error: err instanceof Error ? `Database insert failed: ${err.message}` : 'Database insert failed' },
+      { status: 500 },
+    );
   }
 
-  // 3. Return immediately
-  const response = NextResponse.json({ id, status: 'processing' }, { status: 201 });
+  console.log(`[upload] ${id} stored ${normalized.ext} (${stored.bytes} bytes) at ${stored.url}`);
 
-  // 4. Fire-and-forget enrichment pipeline
-  // waitUntil is not available in standard Next.js outside of middleware/edge;
-  // we use a detached promise here. On Vercel, the function stays alive until
-  // the async work completes when using Node.js runtime.
-  enrichRecording(id, audioUrl).catch((err: unknown) => {
-    console.error('[upload] enrichRecording failed:', err);
-  });
+  return NextResponse.json(
+    { id, status: 'uploaded', audioUrl: stored.url, audioContentType: stored.contentType },
+    { status: 201 },
+  );
+}
 
-  return response;
+export async function OPTIONS(): Promise<Response> {
+  return new Response(null, { status: 204 });
+}
+
+/** Falls back to server time when the client sends nothing usable. */
+function readIsoTimestamp(value: FormDataEntryValue | null): string {
+  if (typeof value === 'string') {
+    const parsed = new Date(value);
+    if (!Number.isNaN(parsed.getTime())) return parsed.toISOString();
+  }
+  return new Date().toISOString();
+}
+
+function readCoordinate(value: FormDataEntryValue | null): number | null {
+  if (typeof value !== 'string' || !value.trim()) return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
 }

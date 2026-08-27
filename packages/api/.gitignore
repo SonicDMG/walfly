@@ -1,0 +1,5 @@
+# Locally stored audio (used only when BLOB_READ_WRITE_TOKEN is unset)
+.data/
+
+# Server secrets — Next.js loads .env* only from this directory
+.env*.local

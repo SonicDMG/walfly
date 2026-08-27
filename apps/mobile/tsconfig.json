@@ -3,9 +3,8 @@
   "compilerOptions": {
     "strict": true,
     "paths": {
-      "@/*": ["./*"],
-      "@walfly/db": ["../../packages/db/src/index.ts"]
+      "@/*": ["./*"]
     }
   },
-  "include": ["**/*.ts", "**/*.tsx", "../../packages/db/src/**/*.ts"]
+  "include": ["**/*.ts", "**/*.tsx"]
 }

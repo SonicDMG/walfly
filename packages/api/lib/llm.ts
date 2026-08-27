@@ -1,37 +1,63 @@
 /**
  * llm.ts
  *
- * Thin OpenAI-SDK wrapper pointed at an OpenAI-compatible LLM proxy.
- * Swap models/providers by changing env vars — no code changes needed:
- *   LLM_BASE_URL  — proxy base URL (e.g. https://openrouter.ai/api/v1)
- *   LLM_API_KEY   — API key for the proxy
- *   LLM_MODEL     — model identifier (e.g. gpt-4o, claude-3-5-sonnet, etc.)
+ * Thin OpenAI-SDK wrapper pointed at an OpenAI-compatible proxy (LiteLLM,
+ * OpenRouter, Ollama). Provider and model are swapped purely through env:
+ *   LLM_BASE_URL  — proxy base URL
+ *   LLM_API_KEY   — API key for the proxy ("ollama" for a local Ollama)
+ *   LLM_MODEL     — model identifier; REQUIRED, there is no default
+ *   LLM_JSON_MODE — auto | on | off; "off" disables response_format entirely
+ *
+ * The client carries explicit timeouts and NO SDK-level retries: the SDK
+ * default is a ten-minute request timeout with two retries, which can hold a
+ * serverless invocation open for half an hour. The recording pipeline is itself
+ * a retry loop with an expiring lease, so a second retry layer here would only
+ * push one call past the lease that guards it and let two paid completions run
+ * against the same transcript at once. Worst case is now a single 60 s call.
  */
 
 import OpenAI from 'openai';
 
-function getLlmClient(): OpenAI {
-  const baseURL = process.env.LLM_BASE_URL;
-  const apiKey = process.env.LLM_API_KEY;
+let client: OpenAI | null = null;
 
+/** Singleton LLM client. Throws when LLM_API_KEY is missing. */
+export function llmClient(): OpenAI {
+  if (client) return client;
+
+  const apiKey = process.env.LLM_API_KEY;
   if (!apiKey) {
-    throw new Error('Missing LLM_API_KEY env var — set LLM_API_KEY (use "ollama" for local Ollama)');
+    throw new Error('Missing LLM_API_KEY env var — set LLM_API_KEY (use "ollama" for a local Ollama)');
   }
 
-  return new OpenAI({
+  const baseURL = process.env.LLM_BASE_URL;
+
+  client = new OpenAI({
     apiKey,
     ...(baseURL ? { baseURL } : {}),
+    timeout: 60_000,
+    maxRetries: 0,
   });
+
+  return client;
 }
 
-/** Default model from env, falls back to gpt-4o */
+/**
+ * The configured model. Deliberately has no default: a silently wrong default
+ * model produces a 404 from the proxy that reads like a network failure.
+ */
 export function getLlmModel(): string {
-  return process.env.LLM_MODEL ?? 'gpt-4o';
+  const model = process.env.LLM_MODEL;
+  if (!model) {
+    throw new Error('Missing LLM_MODEL env var — set the exact model id your LLM_BASE_URL serves');
+  }
+  return model;
 }
 
-/** Singleton LLM client (lazy) */
-let _client: OpenAI | null = null;
-export function llmClient(): OpenAI {
-  if (!_client) _client = getLlmClient();
-  return _client;
+export function isLlmConfigured(): boolean {
+  return Boolean(process.env.LLM_API_KEY && process.env.LLM_MODEL);
+}
+
+/** Whether to attempt response_format: json_object. Several proxies reject it. */
+export function supportsJsonMode(): boolean {
+  return process.env.LLM_JSON_MODE !== 'off';
 }
