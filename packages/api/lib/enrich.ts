@@ -12,7 +12,7 @@
  * reply is parsed defensively from the raw text.
  */
 
-import { getLlmModel, llmClient, supportsJsonMode } from './llm';
+import { getLlmModel, getLlmProvider, llmClient, supportsJsonMode } from './llm';
 
 export interface EnrichResult {
   title: string;
@@ -53,10 +53,14 @@ export async function enrichTranscript(transcript: string): Promise<EnrichResult
       ? `${spoken.slice(0, MAX_ENRICH_CHARS)}\n\n[transcript truncated]`
       : spoken;
 
+  const wasTruncated = spoken.length > MAX_ENRICH_CHARS;
+  console.log(`[LLM:${getLlmProvider()}] starting enrichment — input=${truncated.length} chars${wasTruncated ? ' (truncated)' : ''}`);
+
   const raw = await completeJson(truncated);
+  console.log(`[LLM:${getLlmProvider()}] response received (${raw.length} chars)`);
   const parsed = parseJsonObject(raw);
 
-  return {
+  const result = {
     title: clampString(asString(parsed.title) ?? '', 300) || 'Untitled recording',
     summary: asString(parsed.summary) ?? '',
     keyTakeaways: asStringArray(parsed.keyTakeaways),
@@ -64,6 +68,8 @@ export async function enrichTranscript(transcript: string): Promise<EnrichResult
     tags: asStringArray(parsed.tags).map((t) => t.toLowerCase()),
     speakers: asStringArray(parsed.speakers),
   };
+  console.log(`[LLM:${getLlmProvider()}] parsed — title="${result.title}" takeaways=${result.keyTakeaways.length} actions=${result.actionItems.length} tags=[${result.tags.join(', ')}]`);
+  return result;
 }
 
 /**
@@ -80,6 +86,7 @@ async function completeJson(transcript: string): Promise<string> {
   ];
 
   if (supportsJsonMode()) {
+    console.log(`[LLM:${getLlmProvider()}] → ${model} with JSON mode`);
     try {
       const response = await client.chat.completions.create({
         model,
@@ -90,10 +97,11 @@ async function completeJson(transcript: string): Promise<string> {
       return requireContent(response.choices[0]?.message?.content);
     } catch (err) {
       if (!isResponseFormatRejection(err)) throw err;
-      console.warn('[enrich] provider rejected response_format — retrying without JSON mode');
+      console.warn(`[LLM:${getLlmProvider()}] provider rejected response_format — retrying without JSON mode`);
     }
   }
 
+  console.log(`[LLM:${getLlmProvider()}] → ${model} without JSON mode`);
   const response = await client.chat.completions.create({
     model,
     messages,

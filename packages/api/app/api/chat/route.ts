@@ -73,7 +73,7 @@ export async function POST(req: NextRequest) {
   try {
     systemPrompt = await buildSystemPrompt(lastUserMessage, body.recordingId);
   } catch (err) {
-    console.error('[chat] retrieval failed:', err instanceof Error ? err.message : err);
+    console.error('[Astra] retrieval failed:', err instanceof Error ? err.message : err);
     return NextResponse.json(
       { error: err instanceof Error ? err.message : 'Failed to load recording context' },
       { status: 500 },
@@ -139,10 +139,13 @@ async function buildSystemPrompt(question: string, recordingId?: string): Promis
   const collection = getRecordingsCollection();
 
   if (recordingId) {
+    console.log(`[Astra] fetching recording ${recordingId} for single-recording context`);
     const rec = await collection.findOne({ _id: recordingId });
     if (!rec) {
+      console.log(`[Astra] recording ${recordingId} not found`);
       return 'You are the assistant for the Walfly app. The recording the user is asking about no longer exists; say so plainly.';
     }
+    console.log(`[Astra] building transcript context for "${rec.title}" (${(rec.transcript ?? '').length} chars)`);
 
     const transcript = (rec.transcript ?? '').slice(0, CHAT_TRANSCRIPT_MAX_CHARS);
     const truncated = (rec.transcript ?? '').length > CHAT_TRANSCRIPT_MAX_CHARS;
@@ -168,13 +171,15 @@ async function buildSystemPrompt(question: string, recordingId?: string): Promis
       .join('\n');
   }
 
+  const clampedQuery = clampVectorizeText(question);
+  console.log(`[Astra / Vectorize] vector search — query=${clampedQuery.length} chars limit=${CONTEXT_RECORDINGS} minSimilarity=${MIN_SIMILARITY}`);
   const results = await collection
     .find(
       { status: 'ready' },
       {
         // Clamped: the embedding provider hard-caps input at 512 tokens and
         // rejects the whole find() when a longer query is sent.
-        sort: { $vectorize: clampVectorizeText(question) },
+        sort: { $vectorize: clampedQuery },
         limit: CONTEXT_RECORDINGS,
         includeSimilarity: true,
         projection: { title: 1, createdAt: 1, summary: 1, keyTakeaways: 1 },
@@ -185,6 +190,13 @@ async function buildSystemPrompt(question: string, recordingId?: string): Promis
   const relevant = (results as unknown as Array<Recording & { $similarity?: number }>).filter(
     (r) => (r.$similarity ?? 0) >= MIN_SIMILARITY,
   );
+
+  console.log(`[Astra / Vectorize] returned ${results.length} candidates, ${relevant.length} above similarity threshold`);
+  if (relevant.length > 0) {
+    for (const r of relevant) {
+      console.log(`[Astra / Vectorize]   "${(r as Recording).title}" similarity=${((r as Recording & { $similarity?: number }).$similarity ?? 0).toFixed(3)}`);
+    }
+  }
 
   if (relevant.length === 0) {
     return 'You are the assistant for the Walfly app. None of the user\'s recordings are relevant to this question. Say so, and answer generally only if that is useful.';

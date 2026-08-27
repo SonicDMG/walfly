@@ -57,6 +57,22 @@ export function isLlmConfigured(): boolean {
   return Boolean(process.env.LLM_API_KEY && process.env.LLM_MODEL);
 }
 
+/**
+ * A short human-readable label for the configured LLM provider, derived from
+ * LLM_BASE_URL. Used in log prefixes so it is immediately obvious which service
+ * is being called — e.g. "[LLM:OpenAI]", "[LLM:Ollama]", "[LLM:OpenRouter]".
+ */
+export function getLlmProvider(): string {
+  const base = process.env.LLM_BASE_URL?.trim() ?? '';
+  if (!base) return 'OpenAI';
+  if (/ollama/i.test(base) || base.includes('11434')) return 'Ollama';
+  if (/openrouter/i.test(base)) return 'OpenRouter';
+  if (/litellm/i.test(base)) return 'LiteLLM';
+  if (/openai/i.test(base)) return 'OpenAI';
+  // Fall back to the hostname so the log is still informative for custom proxies.
+  try { return new URL(base).hostname; } catch { return base.slice(0, 40); }
+}
+
 /** Whether to attempt response_format: json_object. Several proxies reject it. */
 export function supportsJsonMode(): boolean {
   return process.env.LLM_JSON_MODE !== 'off';

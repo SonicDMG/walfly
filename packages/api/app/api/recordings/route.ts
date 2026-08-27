@@ -80,10 +80,12 @@ export async function GET(req: NextRequest) {
     const collection = getRecordingsCollection();
 
     if (!q) {
+      console.log(`[Astra] listing all recordings (limit=${limit})`);
       // In-memory sort on an indexed field: fine below ~10k documents.
       const docs = await collection
         .find({}, { sort: { createdAt: -1 }, limit, projection: SUMMARY_PROJECTION })
         .toArray();
+      console.log(`[Astra] list returned ${docs.length} documents`);
       return NextResponse.json(docs.map((d) => toSummary(d as unknown as Recording)));
     }
 
@@ -91,11 +93,14 @@ export async function GET(req: NextRequest) {
     // over-long sort value is rejected by the provider and fails the command.
     const vectorQuery = clampVectorizeText(q);
 
+    console.log(`[Astra] search query="${q}" vectorQuery=${vectorQuery.length} chars`);
     const capabilities = await getCollectionCapabilities();
+    console.log(`[Astra] capabilities: lexical=${capabilities.lexical} rerank=${capabilities.rerank} known=${capabilities.known}`);
 
     if (capabilities.lexical && capabilities.rerank) {
       // No projection here: the server reranks on $lexical, so the fields are
       // stripped in JS afterwards instead.
+      console.log(`[Astra / Vectorize] using hybrid findAndRerank with NVIDIA reranker (vectorLimit=${RETRIEVAL_LIMIT} lexicalLimit=${RETRIEVAL_LIMIT})`);
       const rows = await collection
         .findAndRerank(
           { status: 'ready' },
@@ -103,9 +108,11 @@ export async function GET(req: NextRequest) {
         )
         .toArray();
 
+      console.log(`[Astra / Vectorize] findAndRerank returned ${rows.length} results`);
       return NextResponse.json(rows.map((r) => toSummary(r.document as unknown as Recording)));
     }
 
+    console.log(`[Astra / Vectorize] using portable RRF search (vector + token)`);
     return NextResponse.json(await portableSearch(collection, q, vectorQuery, limit));
   } catch (err) {
     logDataApiError('search', err);
@@ -127,6 +134,7 @@ async function portableSearch(
   limit: number,
 ): Promise<RecordingSummary[]> {
   const tokens = tokenizeQuery(q);
+  console.log(`[Astra / Vectorize] portableSearch tokens=[${tokens.join(', ')}] vectorLimit=${RETRIEVAL_LIMIT}`);
 
   const [vecR, kwR] = await Promise.allSettled([
     collection
@@ -157,6 +165,7 @@ async function portableSearch(
 
   const vectorHits = vecR.status === 'fulfilled' ? (vecR.value as unknown as Recording[]) : [];
   const keywordHits = kwR.status === 'fulfilled' ? (kwR.value as unknown as Recording[]) : [];
+  console.log(`[Astra / Vectorize] portableSearch vector=${vectorHits.length} hits keyword=${keywordHits.length} hits`);
 
   const scored = new Map<string, { doc: Recording; score: number }>();
 

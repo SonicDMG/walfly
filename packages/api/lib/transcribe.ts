@@ -60,7 +60,7 @@ export async function transcribeAudio(audioUrl: string): Promise<string> {
   );
 
   const url = `${sidecarUrl()}/v1/transcribe`;
-  console.log(`[transcribe] → POST ${url} file=${normalized.filename} bytes=${normalized.bytes.byteLength}`);
+  console.log(`[Docling local / Whisper Turbo] → POST ${url} file=${normalized.filename} bytes=${normalized.bytes.byteLength}`);
 
   let res: Response;
   try {
@@ -101,6 +101,6 @@ export async function transcribeAudio(audioUrl: string): Promise<string> {
     throw new TranscriptionError('empty_transcript', 'Sidecar returned an empty transcript', { retryable: false });
   }
 
-  console.log(`[transcribe] ✓ ${markdown.length} chars`);
+  console.log(`[Docling local / Whisper Turbo] ✓ transcript ${markdown.length} chars`);
   return markdown;
 }

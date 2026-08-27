@@ -79,13 +79,16 @@ export async function createRecording(input: CreateRecordingInput): Promise<void
     searchTokens: [],
   };
 
+  console.log(`[Astra] inserting recording ${input.id} (${input.duration}s, ${input.audioContentType})`);
   await collection.insertOne(doc);
+  console.log(`[Astra] ${input.id} inserted → status=uploaded`);
 }
 
 /** The subset of fields one pipeline tick needs. Long fields stay unprojected. */
 export async function getPipelineRecord(id: string): Promise<PipelineRecord | null> {
   const collection = getRecordingsCollection();
 
+  console.log(`[Astra] fetching pipeline record ${id}`);
   const doc = await collection.findOne(
     { _id: id },
     {
@@ -103,8 +106,12 @@ export async function getPipelineRecord(id: string): Promise<PipelineRecord | nu
     },
   );
 
-  if (!doc) return null;
+  if (!doc) {
+    console.log(`[Astra] ${id} not found`);
+    return null;
+  }
 
+  console.log(`[Astra] ${id} fetched → status=${doc.status} attempts=${doc.attempts}`);
   return {
     _id: doc._id,
     status: doc.status,
@@ -131,12 +138,15 @@ export async function acquireLease(
   const collection = getRecordingsCollection();
   const now = Date.now();
 
+  console.log(`[Astra] acquiring lease for ${id} (status=${expectedStatus}, duration=${leaseMs}ms)`);
   const result = await collection.updateOne(
     { _id: id, status: expectedStatus, leaseUntil: { $lt: now } },
     { $set: { leaseUntil: now + leaseMs } },
   );
 
-  return result.matchedCount === 1;
+  const acquired = result.matchedCount === 1;
+  console.log(`[Astra] lease for ${id}: ${acquired ? 'acquired' : 'not acquired (already held or status mismatch)'}`);
+  return acquired;
 }
 
 /** Frees the lease so the next tick can pick the job up immediately. */
@@ -175,6 +185,7 @@ export async function storeDoclingTaskId(id: string, taskId: string): Promise<vo
 export async function storeTranscript(id: string, transcript: string): Promise<void> {
   const collection = getRecordingsCollection();
 
+  console.log(`[Astra] storing transcript for ${id} (${transcript.length} chars) → status=enriching`);
   const result = await collection.updateOne(
     { _id: id },
     { $set: { transcript, status: 'enriching', leaseUntil: 0, attempts: 0 } },
@@ -183,6 +194,7 @@ export async function storeTranscript(id: string, transcript: string): Promise<v
   if (result.matchedCount === 0) {
     throw new Error(`Recording ${id} not found while storing its transcript`);
   }
+  console.log(`[Astra] ${id} transcript stored`);
 }
 
 /** enriching → ready. Writes the bounded embedding text and the search fields. */
@@ -192,7 +204,9 @@ export async function storeEnrichment(
   enrichment: EnrichResult,
 ): Promise<void> {
   const collection = getRecordingsCollection();
+  console.log(`[Astra] fetching collection capabilities for ${id}`);
   const capabilities = await getCollectionCapabilities();
+  console.log(`[Astra] capabilities: lexical=${capabilities.lexical} rerank=${capabilities.rerank} known=${capabilities.known}`);
 
   const title = clampIndexedString(enrichment.title.trim() || 'Untitled recording');
   const tags = clampTags(enrichment.tags);
@@ -233,12 +247,15 @@ export async function storeEnrichment(
   // field is written optimistically and dropped only if Astra actually refuses.
   const attemptLexical = capabilities.lexical || !capabilities.known;
 
+  const vectorizeText = $set.$vectorize as string;
+  console.log(`[Astra] ${id} writing enrichment — title="${enrichment.title}" vectorize=${vectorizeText.length} chars lexical=${attemptLexical}`);
+
   let result = await tryUpdate(attemptLexical ? { ...$set, $lexical: lexical } : $set);
 
   if (!result.ok) {
     if (!attemptLexical || capabilities.lexical) throw result.error;
     console.warn(
-      `[store] ${id}: the collection rejected $lexical, retrying without it:`,
+      `[Astra] ${id}: the collection rejected $lexical, retrying without it:`,
       result.error instanceof Error ? result.error.message : result.error,
     );
     result = await tryUpdate($set);
@@ -248,6 +265,7 @@ export async function storeEnrichment(
   if (result.matchedCount === 0) {
     throw new Error(`Recording ${id} not found while storing its enrichment`);
   }
+  console.log(`[Astra] ${id} enrichment stored → status=ready`);
 
   async function tryUpdate(
     update: Record<string, any>,
@@ -274,6 +292,7 @@ export async function recordTransientFailure(
 ): Promise<void> {
   const collection = getRecordingsCollection();
 
+  console.log(`[Astra] recording transient failure for ${id} at stage=${stage}`);
   await collection.updateOne(
     { _id: id },
     {
@@ -291,6 +310,7 @@ export async function storeFailure(
 ): Promise<void> {
   const collection = getRecordingsCollection();
 
+  console.log(`[Astra] recording terminal failure for ${id} at stage=${stage}: ${message.slice(0, 200)}`);
   await collection.updateOne(
     { _id: id },
     {

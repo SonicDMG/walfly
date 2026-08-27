@@ -88,6 +88,8 @@ export function localAudioPath(name: string): string | null {
  */
 export async function storeAudio(key: string, bytes: Uint8Array, contentType: string): Promise<StoredAudio> {
   const size = bytes.byteLength;
+  const mode = storageMode();
+  console.log(`[${mode === 'blob' ? 'Vercel Blob' : 'local storage'}] storing audio key=${key} size=${size} bytes`);
 
   if (process.env.BLOB_READ_WRITE_TOKEN) {
     const blob = await put(key, Buffer.from(bytes), {
@@ -95,6 +97,7 @@ export async function storeAudio(key: string, bytes: Uint8Array, contentType: st
       contentType,
       addRandomSuffix: false,
     });
+    console.log(`[Vercel Blob] stored → ${blob.url}`);
     return { url: blob.url, contentType, bytes: size };
   }
 
@@ -111,7 +114,9 @@ export async function storeAudio(key: string, bytes: Uint8Array, contentType: st
   await mkdir(localAudioDir(), { recursive: true });
   await writeFile(path, Buffer.from(bytes));
 
-  return { url: `${LOCAL_AUDIO_URL_PREFIX}${encodeURIComponent(name)}`, contentType, bytes: size };
+  const url = `${LOCAL_AUDIO_URL_PREFIX}${encodeURIComponent(name)}`;
+  console.log(`[local storage] stored → ${url}`);
+  return { url, contentType, bytes: size };
 }
 
 /**
@@ -120,6 +125,7 @@ export async function storeAudio(key: string, bytes: Uint8Array, contentType: st
  */
 export async function loadAudio(audioUrl: string): Promise<{ bytes: Uint8Array; contentType: string }> {
   if (audioUrl.startsWith(LOCAL_AUDIO_URL_PREFIX)) {
+    console.log(`[local storage] loading audio from ${audioUrl}`);
     const name = decodeURIComponent(audioUrl.slice(LOCAL_AUDIO_URL_PREFIX.length));
     const path = localAudioPath(name);
     if (!path) throw new Error(`Unsafe local audio URL: ${audioUrl}`);
@@ -127,13 +133,16 @@ export async function loadAudio(audioUrl: string): Promise<{ bytes: Uint8Array; 
     // bundler traces the entire repository into the deployment output. This
     // branch only runs off-Vercel anyway; there, storeAudio requires Blob.
     const buffer = await readFile(/* turbopackIgnore: true */ path);
-    return {
+    const result = {
       bytes: new Uint8Array(buffer),
       contentType: contentTypeForExtension(extensionOf(name)),
     };
+    console.log(`[local storage] loaded (${result.bytes.byteLength} bytes, ${result.contentType})`);
+    return result;
   }
 
   if (/^https?:\/\//i.test(audioUrl)) {
+    console.log(`[Vercel Blob] loading audio from ${audioUrl}`);
     let res: Response;
     try {
       res = await fetch(audioUrl, { signal: AbortSignal.timeout(REMOTE_FETCH_TIMEOUT_MS) });
@@ -153,10 +162,12 @@ export async function loadAudio(audioUrl: string): Promise<{ bytes: Uint8Array; 
     } catch (cause) {
       throw new TransientStorageError(`Reading the stored audio body from ${audioUrl} failed`, cause);
     }
-    return {
+    const result = {
       bytes: new Uint8Array(buffer),
       contentType: res.headers.get('content-type') ?? contentTypeForExtension(extensionOf(audioUrl)),
     };
+    console.log(`[Vercel Blob] loaded (${result.bytes.byteLength} bytes, ${result.contentType})`);
+    return result;
   }
 
   throw new Error(`Unrecognised audioUrl form: ${audioUrl}`);
@@ -165,18 +176,22 @@ export async function loadAudio(audioUrl: string): Promise<{ bytes: Uint8Array; 
 /** Removes the stored object. Handles both the Blob and the local-file case. */
 export async function deleteAudio(audioUrl: string): Promise<void> {
   if (audioUrl.startsWith(LOCAL_AUDIO_URL_PREFIX)) {
+    console.log(`[local storage] deleting audio at ${audioUrl}`);
     const name = decodeURIComponent(audioUrl.slice(LOCAL_AUDIO_URL_PREFIX.length));
     const path = localAudioPath(name);
     if (!path) return;
     await unlink(path).catch((err: NodeJS.ErrnoException) => {
       if (err?.code !== 'ENOENT') throw err;
     });
+    console.log(`[local storage] deleted audio file`);
     return;
   }
 
   if (/^https?:\/\//i.test(audioUrl)) {
+    console.log(`[Vercel Blob] deleting audio at ${audioUrl}`);
     if (!process.env.BLOB_READ_WRITE_TOKEN) return;
     await del(audioUrl, { abortSignal: AbortSignal.timeout(REMOTE_FETCH_TIMEOUT_MS) });
+    console.log(`[Vercel Blob] deleted object`);
   }
 }
 
