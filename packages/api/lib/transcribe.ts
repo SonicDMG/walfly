@@ -1,25 +1,24 @@
 /**
  * transcribe.ts
  *
- * Provider-facing seam for speech-to-text. Sends the audio bytes directly to
- * the OpenAI Whisper transcriptions API — no server, no polling, no task IDs.
- * This mirrors the Python reference script (transcribe.py) which runs Whisper
- * in-process via the Docling Python library; here the equivalent is calling
- * the Whisper API synchronously from the pipeline.
+ * Calls the local Python sidecar (packages/api/sidecar/transcribe_sidecar.py)
+ * which imports docling directly and runs Whisper Turbo via AsrPipeline.
  *
- * The call is a single awaited fetch: the pipeline leases the step for
- * LEASE_TRANSCRIBE_MS and gets back a markdown transcript in one shot.
+ * The sidecar exposes POST /v1/transcribe — a synchronous endpoint that blocks
+ * until transcription is complete and returns {"markdown": "..."}.  This matches
+ * the single-call contract the pipeline expects from transcribeAudio().
  *
- * Response format "verbose_json" gives us word-level timestamps; we convert
- * them to the same "[time: a-b] text" paragraph format the rest of the app
- * expects (identical to what docling ASR emits).
+ * Configuration:
+ *   SIDECAR_URL  — base URL of the sidecar (default: http://localhost:5002)
+ *
+ * Start the sidecar before running the API:
+ *   cd packages/api/sidecar && uv run python transcribe_sidecar.py
  */
 
-import { getWhisperModel, isWhisperConfigured, whisperClient } from './whisper';
-import { loadAudio } from './storage';
 import { normalizeAudioForAsr } from './docling';
+import { loadAudio } from './storage';
 
-export { isWhisperConfigured as isTranscriptionConfigured };
+const TRANSCRIBE_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes — whisper can be slow
 
 export class TranscriptionError extends Error {
   readonly code: string;
@@ -37,127 +36,71 @@ export class TranscriptionError extends Error {
   }
 }
 
+export function isTranscriptionConfigured(): boolean {
+  return true; // sidecar has no required credentials
+}
+
+function sidecarUrl(): string {
+  return (process.env.SIDECAR_URL ?? 'http://localhost:5002').replace(/\/+$/, '');
+}
+
 /**
- * Loads the stored audio, normalises the container, and calls the Whisper
- * transcriptions endpoint. Returns timestamped markdown in the same
- * "[time: a-b] text" format used throughout the rest of the app.
- *
- * Throws TranscriptionError on non-retryable failures (bad audio format,
- * auth errors) and on retryable failures (network timeouts, 5xx) so the
- * pipeline can decide whether to retry.
+ * Loads the stored audio, normalises the container, POSTs it to the sidecar,
+ * and returns the timestamped markdown transcript.
  */
 export async function transcribeAudio(audioUrl: string): Promise<string> {
   const { bytes } = await loadAudio(audioUrl);
   const normalized = normalizeAudioForAsr(bytes, 'recording');
 
-  const openai = whisperClient();
-  const model = getWhisperModel();
+  const form = new FormData();
+  form.append(
+    'files',
+    new Blob([normalized.bytes as unknown as BlobPart], { type: normalized.mime }),
+    normalized.filename,
+  );
 
-  let result: Awaited<ReturnType<typeof openai.audio.transcriptions.create>>;
+  const url = `${sidecarUrl()}/v1/transcribe`;
+  console.log(`[transcribe] → POST ${url} file=${normalized.filename} bytes=${normalized.bytes.byteLength}`);
+
+  let res: Response;
   try {
-    result = await openai.audio.transcriptions.create({
-      model,
-      file: new File([normalized.bytes as unknown as BlobPart], normalized.filename, { type: normalized.mime }),
-      response_format: 'verbose_json',
-      timestamp_granularities: ['segment'],
+    res = await fetch(url, {
+      method: 'POST',
+      body: form,
+      signal: AbortSignal.timeout(TRANSCRIBE_TIMEOUT_MS),
     });
   } catch (cause) {
-    const isTimeout =
-      cause instanceof Error &&
-      (cause.name === 'APIConnectionTimeoutError' ||
-        cause.name === 'TimeoutError' ||
-        cause.name === 'AbortError');
-
-    if (isTimeout) {
-      throw new TranscriptionError(
-        'transient',
-        `Whisper transcription timed out: ${String(cause)}`,
-        { retryable: true, cause },
-      );
-    }
-
-    // OpenAI SDK wraps HTTP errors as APIError subclasses
-    const status = (cause as { status?: number }).status;
-    if (typeof status === 'number') {
-      if (status === 401 || status === 403) {
-        throw new TranscriptionError(
-          'auth',
-          `Whisper API returned ${status} — check WHISPER_API_KEY`,
-          { retryable: false, cause },
-        );
-      }
-      if (status === 413 || status === 415) {
-        throw new TranscriptionError(
-          'unsupported_media',
-          `Whisper API rejected the audio (${status}) — check format or file size`,
-          { retryable: false, cause },
-        );
-      }
-      if (status === 429 || status >= 500) {
-        throw new TranscriptionError(
-          'transient',
-          `Whisper API returned ${status}`,
-          { retryable: true, cause },
-        );
-      }
-    }
-
+    const isTimeout = cause instanceof Error &&
+      (cause.name === 'TimeoutError' || cause.name === 'AbortError');
     throw new TranscriptionError(
-      'transient',
-      `Whisper API call failed: ${String(cause)}`,
+      isTimeout ? 'timeout' : 'transient',
+      `Sidecar request failed: ${String(cause)}`,
       { retryable: true, cause },
     );
   }
 
-  return verboseJsonToMarkdown(result);
-}
-
-// ---------------------------------------------------------------------------
-
-interface VerboseJsonSegment {
-  start?: number;
-  end?: number;
-  text?: string;
-}
-
-interface VerboseJsonResult {
-  text?: string;
-  segments?: VerboseJsonSegment[];
-}
-
-/**
- * Converts Whisper's verbose_json response to the "[time: a-b] text" paragraph
- * format that the rest of the app (including the LLM enrichment prompt) expects.
- * Falls back to the plain `text` field when no segments are present.
- */
-function verboseJsonToMarkdown(result: VerboseJsonResult): string {
-  const segments = result.segments;
-
-  if (!segments?.length) {
-    const text = result.text?.trim();
-    if (!text) {
-      throw new TranscriptionError('empty_transcript', 'Whisper returned an empty transcript');
-    }
-    return text;
+  if (!res.ok) {
+    const body = await res.text().catch(() => '');
+    const retryable = res.status === 429 || res.status >= 500;
+    throw new TranscriptionError(
+      'transient',
+      `Sidecar returned HTTP ${res.status}: ${body.slice(0, 300)}`,
+      { retryable },
+    );
   }
 
-  const lines = segments
-    .filter((s) => s.text?.trim())
-    .map((s) => {
-      const start = fmt(s.start ?? 0);
-      const end = fmt(s.end ?? (s.start ?? 0));
-      return `[time: ${start}-${end}] ${s.text!.trim()}`;
-    });
-
-  if (!lines.length) {
-    throw new TranscriptionError('empty_transcript', 'Whisper returned segments with no text');
+  let json: { markdown?: string };
+  try {
+    json = await res.json() as { markdown?: string };
+  } catch (cause) {
+    throw new TranscriptionError('transient', 'Sidecar returned invalid JSON', { retryable: true, cause });
   }
 
-  return lines.join('\n\n');
-}
+  const markdown = json.markdown?.trim();
+  if (!markdown) {
+    throw new TranscriptionError('empty_transcript', 'Sidecar returned an empty transcript', { retryable: false });
+  }
 
-function fmt(seconds: number): string {
-  const m = Math.floor(seconds / 60);
-  const s = (seconds % 60).toFixed(1).padStart(4, '0');
-  return `${m}:${s}`;
+  console.log(`[transcribe] ✓ ${markdown.length} chars`);
+  return markdown;
 }
