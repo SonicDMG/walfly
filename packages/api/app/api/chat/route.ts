@@ -134,6 +134,15 @@ export async function POST(req: NextRequest) {
   });
 }
 
+const FORMATTING_INSTRUCTIONS = `\
+Format your responses for a mobile app chat interface:
+- Keep prose concise — short paragraphs, no padding.
+- Use bullet lists or numbered lists for steps or multiple items; avoid long unbroken paragraphs.
+- Avoid tables — prefer numbered or bulleted lists instead. If a table is truly the clearest structure, limit it to 2 columns maximum.
+- Use **bold** only for genuinely important terms. Avoid italics.
+- Do not use headings (##, ###) for short answers. Only use them to break up long multi-section responses.
+- Never pad with filler phrases like "Great question!" or "Certainly!".`;
+
 /** Builds the grounded system prompt, or a truthful ungrounded one. */
 async function buildSystemPrompt(question: string, recordingId?: string): Promise<string> {
   const collection = getRecordingsCollection();
@@ -152,13 +161,15 @@ async function buildSystemPrompt(question: string, recordingId?: string): Promis
 
     if (!transcript.trim()) {
       return [
+        FORMATTING_INSTRUCTIONS,
         'You are the assistant for the Walfly app.',
         `The recording "${rec.title}" has no transcript yet (status: ${rec.status}).`,
         'Tell the user it is still being processed, or failed, and do not invent its contents.',
-      ].join(' ');
+      ].join('\n\n');
     }
 
     return [
+      FORMATTING_INSTRUCTIONS,
       "You are a helpful assistant with access to the user's recorded conversations.",
       'Answer only from the transcript below. If it does not contain the answer, say so.',
       '',
@@ -199,7 +210,10 @@ async function buildSystemPrompt(question: string, recordingId?: string): Promis
   }
 
   if (relevant.length === 0) {
-    return 'You are the assistant for the Walfly app. None of the user\'s recordings are relevant to this question. Say so, and answer generally only if that is useful.';
+    return [
+      FORMATTING_INSTRUCTIONS,
+      "You are the assistant for the Walfly app. None of the user's recordings are relevant to this question. Say so, and answer generally only if that is useful.",
+    ].join('\n\n');
   }
 
   const context = relevant
@@ -216,6 +230,7 @@ async function buildSystemPrompt(question: string, recordingId?: string): Promis
     .join('\n\n---\n\n');
 
   return [
+    FORMATTING_INSTRUCTIONS,
     "You are a helpful assistant with access to summaries of the user's recorded conversations.",
     'Answer from the context below. It contains summaries, not full transcripts, so say when a detail is not available.',
     '',

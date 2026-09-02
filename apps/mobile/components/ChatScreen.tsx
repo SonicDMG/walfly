@@ -19,6 +19,7 @@ import {
   Platform,
   ActivityIndicator,
 } from 'react-native';
+import Markdown from 'react-native-markdown-display';
 import * as Progress from 'react-native-progress';
 import { useChat, ChatMessage } from '../hooks/useChat';
 
@@ -85,7 +86,12 @@ export default function ChatScreen({ recordingId, title }: Props) {
           ref={listRef}
           data={messages}
           keyExtractor={(_, i) => String(i)}
-          renderItem={({ item }) => <MessageBubble message={item} />}
+          renderItem={({ item, index }) => (
+            <MessageBubble
+              message={item}
+              isStreaming={isStreaming && index === messages.length - 1 && item.role === 'assistant'}
+            />
+          )}
           contentContainerStyle={styles.messageList}
         />
       )}
@@ -128,16 +134,64 @@ export default function ChatScreen({ recordingId, title }: Props) {
   );
 }
 
-function MessageBubble({ message }: { message: ChatMessage }) {
+function MessageBubble({ message, isStreaming }: { message: ChatMessage; isStreaming?: boolean }) {
   const isUser = message.role === 'user';
+  if (isUser) {
+    return (
+      <View style={styles.rowUser}>
+        <View style={[styles.bubble, styles.bubbleUser]}>
+          <Text style={[styles.bubbleText, styles.bubbleTextUser]}>{message.content}</Text>
+        </View>
+      </View>
+    );
+  }
   return (
-    <View style={[styles.bubble, isUser ? styles.bubbleUser : styles.bubbleAssistant]}>
-      <Text style={[styles.bubbleText, isUser ? styles.bubbleTextUser : styles.bubbleTextAssistant]}>
-        {message.content}
-      </Text>
+    <View style={styles.rowAssistant}>
+      <View style={styles.bubbleAssistant}>
+        {isStreaming ? (
+          <Text style={[styles.bubbleText, styles.bubbleTextAssistant]}>{message.content}</Text>
+        ) : (
+          <Markdown style={markdownStyles}>{message.content}</Markdown>
+        )}
+      </View>
     </View>
   );
 }
+
+const markdownStyles = {
+  body: { fontSize: 15, lineHeight: 22, color: '#1a1a1a', margin: 0 },
+  paragraph: { marginTop: 0, marginBottom: 6 },
+  code_inline: {
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+    backgroundColor: '#ddd',
+    borderRadius: 3,
+    paddingHorizontal: 4,
+    fontSize: 13,
+  },
+  fence: {
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+    backgroundColor: '#e0e0e0',
+    borderRadius: 6,
+    padding: 10,
+    fontSize: 13,
+    lineHeight: 20,
+    marginVertical: 4,
+  },
+  bullet_list: { marginVertical: 4 },
+  ordered_list: { marginVertical: 4 },
+  list_item: { marginBottom: 3 },
+  heading1: { fontSize: 17, fontWeight: '700' as const, marginBottom: 4, marginTop: 8 },
+  heading2: { fontSize: 16, fontWeight: '700' as const, marginBottom: 4, marginTop: 6 },
+  heading3: { fontSize: 15, fontWeight: '600' as const, marginBottom: 2, marginTop: 4 },
+  strong: { fontWeight: '600' as const },
+  hr: { backgroundColor: '#ccc', height: 1, marginVertical: 8 },
+  // Tables
+  table: { borderWidth: 1, borderColor: '#ccc', borderRadius: 6, marginVertical: 6, overflow: 'hidden' as const },
+  thead: { backgroundColor: '#e0e0e0' },
+  th: { padding: 6, fontWeight: '600' as const, fontSize: 13, borderRightWidth: 1, borderRightColor: '#ccc' },
+  td: { padding: 6, fontSize: 13, borderRightWidth: 1, borderRightColor: '#ccc' },
+  tr: { borderBottomWidth: 1, borderBottomColor: '#ccc', flexDirection: 'row' as const },
+};
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#fff' },
@@ -155,10 +209,12 @@ const styles = StyleSheet.create({
   empty: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: 32, gap: 10 },
   emptyTitle: { fontSize: 17, fontWeight: '600', color: '#1a1a1a', textAlign: 'center' },
   emptyHint: { fontSize: 14, color: MUTED, textAlign: 'center', lineHeight: 20 },
-  messageList: { padding: 16, gap: 10 },
-  bubble: { maxWidth: '80%', borderRadius: 16, padding: 12, marginBottom: 6 },
-  bubbleUser: { alignSelf: 'flex-end', backgroundColor: BLUE },
-  bubbleAssistant: { alignSelf: 'flex-start', backgroundColor: '#f0f0f0' },
+  messageList: { padding: 16, gap: 8 },
+  rowUser: { width: '100%', alignItems: 'flex-end' },
+  rowAssistant: { width: '100%', alignItems: 'flex-start' },
+  bubble: { maxWidth: '80%', borderRadius: 16, padding: 12 },
+  bubbleUser: { backgroundColor: BLUE },
+  bubbleAssistant: { backgroundColor: '#f0f0f0', borderRadius: 16, padding: 12, maxWidth: '88%' },
   bubbleText: { fontSize: 15, lineHeight: 21 },
   bubbleTextUser: { color: '#fff' },
   bubbleTextAssistant: { color: '#1a1a1a' },
