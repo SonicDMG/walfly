@@ -19,6 +19,13 @@
  *   - The file is uploaded with its TRUE type. On native the file URI is handed
  *     to FormData directly, because React Native's Blob cannot be built from a
  *     Uint8Array and its FormData only serialises { uri, name, type } parts.
+ *   - On web, recording bypasses expo-av's Audio.Recording and drives
+ *     MediaRecorder directly (see lib/webRecorder.ts), because expo-av only
+ *     captures audio in a single blob assembled at stop() time — if the
+ *     browser halts the recorder first (backgrounded tab, locked screen),
+ *     that blob is never produced and the whole recording is lost silently.
+ *     Chunked capture means whatever was recorded before an interruption
+ *     still uploads.
  *   - Nothing runs in the background on the server: this hook polls
  *     POST /api/recordings/{id}/process, and each tick advances the job one step.
  *   - Every timer, recorder and in-flight request is torn down on unmount, and
@@ -46,6 +53,8 @@ import {
 import { useLocationPermission, type LocationSnapshot } from './useLocationPermission';
 // Web-only in practice; every Web Audio reference inside is guarded at call time.
 import { transcodeToWav } from '../lib/audio-wav';
+// Web-only in practice; every browser API reference inside is guarded at call time.
+import { startWebRecording, type WebRecordingHandle } from '../lib/webRecorder';
 
 export type RecordState =
   | 'idle'
@@ -91,13 +100,19 @@ const PROGRESS_BY_STATUS: Record<RecordingStatus, number> = {
  * → audio/mp4, Firefox → audio/ogg) uploads its recording untouched and keeps
  * Opus/AAC compression.
  *
+ * The codec-qualified `audio/mp4;codecs=mp4a.40.2` is deliberately absent:
+ * Chrome reports it as supported via isTypeSupported, but its AAC encoder
+ * throws EncodingError as soon as an explicit low bitrate (our 32 kbps) is
+ * requested against that exact codec string, so `dataavailable` never
+ * carries any data. Bare `audio/mp4` produces the same AAC-in-MP4 output and
+ * respects the bitrate correctly.
+ *
  * WebM is last, not absent: Chrome can encode nothing else, and refusing to
  * record at all is a worse outcome than recording and converting afterwards.
  * A WebM recording is decoded and re-encoded as WAV before upload — see
  * transcodeToWav — because Docling treats webm as a VIDEO container.
  */
 const WEB_MIME_PREFERENCE = [
-  'audio/mp4;codecs=mp4a.40.2',
   'audio/mp4',
   'audio/ogg;codecs=opus',
   'audio/ogg',
@@ -128,6 +143,7 @@ export function useRecordingUpload() {
 
   const mountedRef = useRef(true);
   const recordingRef = useRef<InstanceType<typeof AudioModule.AudioRecorder> | null>(null);
+  const webRecordingRef = useRef<WebRecordingHandle | null>(null);
   const startedAtRef = useRef(0);
   const startTimestampRef = useRef('');
   const locationPromiseRef = useRef<Promise<LocationSnapshot | null> | null>(null);
@@ -159,6 +175,12 @@ export function useRecordingUpload() {
 
   /** Stops and removes any live recorder. Never throws: teardown must always complete. */
   const teardownRecorder = useCallback(async () => {
+    if (Platform.OS === 'web') {
+      const handle = webRecordingRef.current;
+      webRecordingRef.current = null;
+      handle?.cancel();
+      return;
+    }
     const recording = recordingRef.current;
     recordingRef.current = null;
     if (!recording) return;
@@ -167,8 +189,6 @@ export function useRecordingUpload() {
     } catch {
       // The recorder may already be stopped.
     }
-    const uri = recording.uri;
-    if (Platform.OS === 'web' && uri?.startsWith('blob:')) URL.revokeObjectURL(uri);
   }, []);
 
   useEffect(() => {
@@ -213,10 +233,17 @@ export function useRecordingUpload() {
 
       await setAudioModeAsync(RECORD_AUDIO_MODE);
 
-      const recorder = new AudioModule.AudioRecorder(recordingOptions());
-      await recorder.prepareToRecordAsync();
-      recorder.record();
-      recordingRef.current = recorder;
+      if (Platform.OS === 'web') {
+        webRecordingRef.current = await startWebRecording({
+          mimeTypes: WEB_MIME_PREFERENCE,
+          audioBitsPerSecond: 32000,
+        });
+      } else {
+        const recorder = new AudioModule.AudioRecorder(recordingOptions());
+        await recorder.prepareToRecordAsync();
+        recorder.record();
+        recordingRef.current = recorder;
+      }
       safeSetState('recording');
 
       maxDurationTimerRef.current = setTimeout(() => {
@@ -236,18 +263,20 @@ export function useRecordingUpload() {
   const stopAndUpload = useCallback(async () => {
     // Claimed synchronously. The MAX_RECORDING_MS timer and a double tap inside
     // the MIN_RECORDING_MS floor can both land before React commits the
-    // 'uploading' state, and two calls sharing one Audio.Recording means one of
-    // them fails with "already unloaded" while the other uploads successfully.
-    const recording = recordingRef.current;
-    if (!recording) return;
+    // 'uploading' state, and two calls sharing one recorder means one of them
+    // fails with "already unloaded"/"already stopped" while the other uploads
+    // successfully.
+    const isWeb = Platform.OS === 'web';
+    const recording = isWeb ? null : recordingRef.current;
+    const webHandle = isWeb ? webRecordingRef.current : null;
+    if (!recording && !webHandle) return;
     recordingRef.current = null;
+    webRecordingRef.current = null;
 
     if (maxDurationTimerRef.current) {
       clearTimeout(maxDurationTimerRef.current);
       maxDurationTimerRef.current = null;
     }
-
-    let webBlobUri: string | null = null;
 
     try {
       safeSetState('uploading');
@@ -256,40 +285,15 @@ export function useRecordingUpload() {
       const elapsed = Date.now() - startedAtRef.current;
       if (elapsed < MIN_RECORDING_MS) await sleep(MIN_RECORDING_MS - elapsed);
 
-      let stopError: unknown = null;
-      try {
-        await recording.stop();
-      } catch (err) {
-        stopError = err;
-      }
-
-      // Must come after stop(): on web the URI isn't available until the
-      // MediaRecorder blob exists.
-      const uri = recording.uri;
-      if (Platform.OS === 'web' && uri?.startsWith('blob:')) webBlobUri = uri;
-
-      // Put the iOS session back to playback before anything else can fail.
-      await releaseIosRecordSession();
-
-      if (stopError) {
-        throw new Error(
-          `Recording could not be finalised: ${
-            stopError instanceof Error ? stopError.message : String(stopError)
-          }`,
-        );
-      }
-      if (!uri) throw new Error('No recording URI after stop');
-
-      const durationSec = Math.max(
-        1,
-        Math.round((recording.currentTime * 1000 || Date.now() - startedAtRef.current) / 1000),
-      );
-
       const formData = new FormData();
+      let durationSec: number;
       let byteSize: number;
 
-      if (Platform.OS === 'web') {
-        const recorded = await fetch(uri).then((r) => r.blob());
+      if (webHandle) {
+        // Whatever chunks were captured before an interruption are still
+        // included here — see lib/webRecorder.ts.
+        const { blob: recorded, durationMillis } = await webHandle.stop();
+        durationSec = Math.max(1, Math.round(durationMillis / 1000));
         // recorded.type is authoritative: the browser may have ignored the
         // mimeType we asked for. The server re-sniffs the bytes regardless.
         const prepared = await prepareWebUpload(recorded);
@@ -297,14 +301,43 @@ export function useRecordingUpload() {
         assertUploadSize(byteSize, durationSec, await fetchMaxUploadBytes());
         formData.append('audio', prepared.blob, `recording.${prepared.ext}`);
         formData.append('audioMimeType', prepared.mime);
-      } else {
-        // expo-av produces AAC in an MPEG-4 container on both iOS and Android.
+      } else if (recording) {
+        let stopError: unknown = null;
+        try {
+          await recording.stop();
+        } catch (err) {
+          stopError = err;
+        }
+        const uri = recording.uri;
+
+        // Put the iOS session back to playback before anything else can fail.
+        await releaseIosRecordSession();
+
+        if (stopError) {
+          throw new Error(
+            `Recording could not be finalised: ${
+              stopError instanceof Error ? stopError.message : String(stopError)
+            }`,
+          );
+        }
+        if (!uri) {
+          throw new Error('Recording could not be saved — no audio file was produced. Try recording again.');
+        }
+
+        durationSec = Math.max(
+          1,
+          Math.round((recording.currentTime * 1000 || Date.now() - startedAtRef.current) / 1000),
+        );
+
+        // expo-audio produces AAC in an MPEG-4 container on both iOS and Android.
         const shape = uploadShapeFor('audio/mp4');
         const fileRef = new ExpoFile(uri);
         byteSize = fileRef.exists ? fileRef.size : 0;
         assertUploadSize(byteSize, durationSec, await fetchMaxUploadBytes());
         formData.append('audio', fileRef, `recording.${shape.ext}`);
         formData.append('audioMimeType', shape.mime);
+      } else {
+        return;
       }
 
       formData.append('duration', String(durationSec));
@@ -364,8 +397,6 @@ export function useRecordingUpload() {
       }
     } finally {
       abortRef.current = null;
-      // expo-av never revokes the object URL it creates on web.
-      if (webBlobUri) URL.revokeObjectURL(webBlobUri);
     }
   }, [safeSetProgress, safeSetState]);
 
@@ -409,11 +440,11 @@ const PLAYBACK_AUDIO_MODE = {
 };
 
 /**
- * Speech-grade AAC. Both android and ios blocks are always present even when
- * only `web` is used.
+ * Speech-grade AAC. Native only — web recording is driven directly by
+ * lib/webRecorder.ts. expo-audio validates the android and ios blocks
+ * even though only one of them applies to the running platform.
  */
 function recordingOptions(): RecordingOptions {
-  const mimeType = Platform.OS === 'web' ? pickWebMimeType() : undefined;
   return {
     isMeteringEnabled: false,
     extension: '.m4a',
@@ -429,22 +460,8 @@ function recordingOptions(): RecordingOptions {
       audioQuality: AudioQuality.MEDIUM,
       bitDepthHint: 16,
     },
-    web: { ...(mimeType ? { mimeType } : {}), bitsPerSecond: 32000 },
+    web: { bitsPerSecond: 32000 },
   };
-}
-
-/**
- * Picks the best container this browser can encode. Every entry is acceptable:
- * the audio ones upload as-is, WebM is converted to WAV after the recording
- * stops. Returning undefined lets MediaRecorder choose its own default rather
- * than failing outright.
- */
-function pickWebMimeType(): string | undefined {
-  if (typeof MediaRecorder === 'undefined' || !MediaRecorder.isTypeSupported) return undefined;
-  for (const candidate of WEB_MIME_PREFERENCE) {
-    if (MediaRecorder.isTypeSupported(candidate)) return candidate;
-  }
-  return undefined;
 }
 
 /** Reverts the iOS audio session so playback returns to the loudspeaker. */

@@ -106,7 +106,6 @@ export async function POST(req: NextRequest) {
             ...history.slice(-MAX_HISTORY_MESSAGES),
           ],
           stream: true,
-          temperature: 0.7,
         });
 
         for await (const chunk of completion) {

@@ -4,8 +4,8 @@
   "private": true,
   "main": "expo-router/entry",
   "scripts": {
-    "dev": "expo start",
-    "dev:web": "expo start --web",
+    "dev": "EXPO_START=1 expo start",
+    "dev:web": "EXPO_START=1 expo start --web",
     "build": "expo export -p web",
     "android": "expo run:android",
     "ios": "expo run:ios"
