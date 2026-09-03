@@ -1,12 +1,22 @@
-import { DynamicColorIOS } from 'react-native';
+import { Platform } from 'react-native';
 import { ThemeProvider, DarkTheme } from 'expo-router';
 import { NativeTabs } from 'expo-router/unstable-native-tabs';
 import { colors } from '../../lib/theme';
 
-const tintColor = DynamicColorIOS({ dark: colors.amber, light: colors.amberDim });
-const labelColor = DynamicColorIOS({ dark: colors.cream, light: '#1A1A1C' });
+// DynamicColorIOS is iOS-only — calling it at module level crashes the web
+// static renderer. We lazily resolve it inside the component so it only runs
+// on a live iOS runtime, never during SSR/static export.
+function iosColor(dark: string, light: string): string {
+  if (Platform.OS !== 'ios') return dark;
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const { DynamicColorIOS } = require('react-native') as typeof import('react-native');
+  return DynamicColorIOS({ dark, light }) as unknown as string;
+}
 
 export default function TabLayout() {
+  const tintColor  = iosColor(colors.amber,  colors.amberDim);
+  const labelColor = iosColor(colors.cream,  '#1A1A1C');
+
   return (
     <ThemeProvider value={DarkTheme}>
       <NativeTabs
