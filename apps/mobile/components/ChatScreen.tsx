@@ -1,13 +1,11 @@
 /**
- * ChatScreen — shared component for both global chat (Tab 3)
+ * ChatScreen — shared component for global chat (Tab 3)
  * and per-recording chat (launched from Recording Detail).
  *
- * Props:
- *   recordingId? — if provided, chat is scoped to that recording's transcript
- *   title?       — header title override
+ * Dark-first. Amber accents. Walfly design system.
  */
 
-import React, { useRef, useEffect } from 'react';
+import { useState, useRef, useEffect } from 'react';
 import {
   View,
   Text,
@@ -17,15 +15,10 @@ import {
   StyleSheet,
   KeyboardAvoidingView,
   Platform,
-  ActivityIndicator,
 } from 'react-native';
 import Markdown from 'react-native-markdown-display';
-import * as Progress from 'react-native-progress';
 import { useChat, ChatMessage } from '../hooks/useChat';
-
-const RED = '#E53935';
-const BLUE = '#3b5bdb';
-const MUTED = '#888';
+import { colors, fonts, fontSizes, spacing, radius } from '../lib/theme';
 
 interface Props {
   recordingId?: string;
@@ -34,10 +27,9 @@ interface Props {
 
 export default function ChatScreen({ recordingId, title }: Props) {
   const { messages, send, isStreaming, error, reset } = useChat({ recordingId });
-  const [input, setInput] = React.useState('');
+  const [input, setInput] = useState('');
   const listRef = useRef<FlatList<ChatMessage>>(null);
 
-  // Auto-scroll to bottom on new message
   useEffect(() => {
     if (messages.length > 0) {
       setTimeout(() => listRef.current?.scrollToEnd({ animated: true }), 50);
@@ -51,6 +43,8 @@ export default function ChatScreen({ recordingId, title }: Props) {
     await send(text);
   }
 
+  const scopeLabel = recordingId ? 'this recording' : 'all moments';
+
   return (
     <KeyboardAvoidingView
       style={styles.container}
@@ -59,26 +53,31 @@ export default function ChatScreen({ recordingId, title }: Props) {
     >
       {/* Header */}
       <View style={styles.header}>
-        <Text style={styles.headerTitle} numberOfLines={1}>
-          {title ?? (recordingId ? 'Recording Chat' : 'Global Chat')}
-        </Text>
+        <View style={styles.headerLeft}>
+          <Text style={styles.headerTitle}>
+            {title ?? 'chat'}
+          </Text>
+          <View style={styles.scopeChip}>
+            <Text style={styles.scopeChipText}>{scopeLabel}</Text>
+          </View>
+        </View>
         {messages.length > 0 && (
           <Pressable onPress={reset} style={styles.clearBtn}>
-            <Text style={styles.clearBtnText}>Clear</Text>
+            <Text style={styles.clearBtnText}>clear</Text>
           </Pressable>
         )}
       </View>
 
-      {/* Message list */}
+      {/* Empty state */}
       {messages.length === 0 ? (
         <View style={styles.empty}>
           <Text style={styles.emptyTitle}>
-            {recordingId ? '🎙 Ask about this recording' : '🌐 Ask across all recordings'}
+            {recordingId ? 'ask about this recording' : 'ask across your moments'}
           </Text>
           <Text style={styles.emptyHint}>
             {recordingId
-              ? 'Ask questions about what was said, who was mentioned, or what decisions were made.'
-              : 'Search and ask questions across all your recorded conversations.'}
+              ? 'What was decided? Who was mentioned? What are the action items?'
+              : 'Search and explore across all your recorded conversations.'}
           </Text>
         </View>
       ) : (
@@ -99,12 +98,11 @@ export default function ChatScreen({ recordingId, title }: Props) {
       {/* Streaming indicator */}
       {isStreaming && (
         <View style={styles.streamingRow}>
-          <Progress.CircleSnail color={[BLUE, MUTED]} size={16} thickness={2} />
-          <Text style={styles.streamingText}>Thinking…</Text>
+          <View style={styles.streamingDot} />
+          <Text style={styles.streamingText}>thinking…</Text>
         </View>
       )}
 
-      {/* Error */}
       {error && <Text style={styles.errorText}>{error}</Text>}
 
       {/* Input bar */}
@@ -113,19 +111,22 @@ export default function ChatScreen({ recordingId, title }: Props) {
           style={styles.input}
           value={input}
           onChangeText={setInput}
-          placeholder="Ask something…"
-          placeholderTextColor={MUTED}
+          placeholder="ask something…"
+          placeholderTextColor={colors.fog}
           multiline
           maxLength={2000}
           onSubmitEditing={handleSend}
           blurOnSubmit={false}
           returnKeyType="send"
           editable={!isStreaming}
+          selectionColor={colors.amber}
         />
         <Pressable
           style={[styles.sendBtn, (!input.trim() || isStreaming) && styles.sendBtnDisabled]}
           onPress={handleSend}
           disabled={!input.trim() || isStreaming}
+          accessibilityRole="button"
+          accessibilityLabel="Send message"
         >
           <Text style={styles.sendBtnText}>↑</Text>
         </Pressable>
@@ -139,8 +140,8 @@ function MessageBubble({ message, isStreaming }: { message: ChatMessage; isStrea
   if (isUser) {
     return (
       <View style={styles.rowUser}>
-        <View style={[styles.bubble, styles.bubbleUser]}>
-          <Text style={[styles.bubbleText, styles.bubbleTextUser]}>{message.content}</Text>
+        <View style={styles.bubbleUser}>
+          <Text style={styles.bubbleTextUser}>{message.content}</Text>
         </View>
       </View>
     );
@@ -149,7 +150,7 @@ function MessageBubble({ message, isStreaming }: { message: ChatMessage; isStrea
     <View style={styles.rowAssistant}>
       <View style={styles.bubbleAssistant}>
         {isStreaming ? (
-          <Text style={[styles.bubbleText, styles.bubbleTextAssistant]}>{message.content}</Text>
+          <Text style={styles.bubbleTextAssistant}>{message.content}</Text>
         ) : (
           <Markdown style={markdownStyles}>{message.content}</Markdown>
         )}
@@ -159,94 +160,198 @@ function MessageBubble({ message, isStreaming }: { message: ChatMessage; isStrea
 }
 
 const markdownStyles = {
-  body: { fontSize: 15, lineHeight: 22, color: '#1a1a1a', margin: 0 },
+  body:      { fontSize: fontSizes.base, lineHeight: 22, color: colors.cream, margin: 0, fontFamily: fonts.body },
   paragraph: { marginTop: 0, marginBottom: 6 },
   code_inline: {
     fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
-    backgroundColor: '#ddd',
+    backgroundColor: colors.charcoal,
     borderRadius: 3,
     paddingHorizontal: 4,
-    fontSize: 13,
+    fontSize: fontSizes.sm,
+    color: colors.amber,
   },
   fence: {
     fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
-    backgroundColor: '#e0e0e0',
-    borderRadius: 6,
-    padding: 10,
-    fontSize: 13,
+    backgroundColor: colors.charcoal,
+    borderRadius: radius.sm,
+    padding: spacing.sm,
+    fontSize: fontSizes.sm,
     lineHeight: 20,
     marginVertical: 4,
+    color: colors.cream,
   },
-  bullet_list: { marginVertical: 4 },
+  bullet_list:  { marginVertical: 4 },
   ordered_list: { marginVertical: 4 },
-  list_item: { marginBottom: 3 },
-  heading1: { fontSize: 17, fontWeight: '700' as const, marginBottom: 4, marginTop: 8 },
-  heading2: { fontSize: 16, fontWeight: '700' as const, marginBottom: 4, marginTop: 6 },
-  heading3: { fontSize: 15, fontWeight: '600' as const, marginBottom: 2, marginTop: 4 },
-  strong: { fontWeight: '600' as const },
-  hr: { backgroundColor: '#ccc', height: 1, marginVertical: 8 },
-  // Tables
-  table: { borderWidth: 1, borderColor: '#ccc', borderRadius: 6, marginVertical: 6, overflow: 'hidden' as const },
-  thead: { backgroundColor: '#e0e0e0' },
-  th: { padding: 6, fontWeight: '600' as const, fontSize: 13, borderRightWidth: 1, borderRightColor: '#ccc' },
-  td: { padding: 6, fontSize: 13, borderRightWidth: 1, borderRightColor: '#ccc' },
-  tr: { borderBottomWidth: 1, borderBottomColor: '#ccc', flexDirection: 'row' as const },
+  list_item:    { marginBottom: 3 },
+  heading1: { fontSize: fontSizes.md, fontWeight: '700' as const, marginBottom: 4, marginTop: 8, color: colors.cream, fontFamily: fonts.display },
+  heading2: { fontSize: fontSizes.base, fontWeight: '700' as const, marginBottom: 4, marginTop: 6, color: colors.cream },
+  heading3: { fontSize: fontSizes.base, fontWeight: '600' as const, marginBottom: 2, marginTop: 4, color: colors.cream },
+  strong: { fontWeight: '600' as const, color: colors.cream },
+  hr: { backgroundColor: colors.border, height: 1, marginVertical: 8 },
+  table: { borderWidth: 1, borderColor: colors.border, borderRadius: radius.sm, marginVertical: 6, overflow: 'hidden' as const },
+  thead: { backgroundColor: colors.charcoal },
+  th: { padding: 6, fontWeight: '600' as const, fontSize: fontSizes.sm, borderRightWidth: 1, borderRightColor: colors.border, color: colors.cream },
+  td: { padding: 6, fontSize: fontSizes.sm, borderRightWidth: 1, borderRightColor: colors.border, color: colors.mist },
+  tr: { borderBottomWidth: 1, borderBottomColor: colors.border, flexDirection: 'row' as const },
 };
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#fff' },
+  container: { flex: 1, backgroundColor: colors.midnight },
+
   header: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    padding: 14,
+    paddingHorizontal: spacing.md,
+    paddingTop: spacing.lg,
+    paddingBottom: spacing.sm,
     borderBottomWidth: 1,
-    borderBottomColor: '#f0f0f0',
+    borderBottomColor: colors.border,
   },
-  headerTitle: { fontSize: 16, fontWeight: '600', color: '#1a1a1a', flex: 1 },
-  clearBtn: { paddingHorizontal: 8 },
-  clearBtnText: { color: MUTED, fontSize: 13 },
-  empty: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: 32, gap: 10 },
-  emptyTitle: { fontSize: 17, fontWeight: '600', color: '#1a1a1a', textAlign: 'center' },
-  emptyHint: { fontSize: 14, color: MUTED, textAlign: 'center', lineHeight: 20 },
-  messageList: { padding: 16, gap: 8 },
-  rowUser: { width: '100%', alignItems: 'flex-end' },
-  rowAssistant: { width: '100%', alignItems: 'flex-start' },
-  bubble: { maxWidth: '80%', borderRadius: 16, padding: 12 },
-  bubbleUser: { backgroundColor: BLUE },
-  bubbleAssistant: { backgroundColor: '#f0f0f0', borderRadius: 16, padding: 12, maxWidth: '88%' },
-  bubbleText: { fontSize: 15, lineHeight: 21 },
-  bubbleTextUser: { color: '#fff' },
-  bubbleTextAssistant: { color: '#1a1a1a' },
-  streamingRow: { flexDirection: 'row', alignItems: 'center', gap: 6, paddingHorizontal: 16, paddingBottom: 4 },
-  streamingText: { fontSize: 12, color: MUTED },
-  errorText: { color: RED, fontSize: 13, textAlign: 'center', padding: 8 },
+  headerLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.xs,
+    flex: 1,
+  },
+  headerTitle: {
+    fontFamily: fonts.display,
+    fontSize: fontSizes.xxl,
+    color: colors.cream,
+    letterSpacing: 1,
+  },
+  scopeChip: {
+    backgroundColor: colors.amberSubtle,
+    borderRadius: radius.full,
+    paddingHorizontal: spacing.xs,
+    paddingVertical: 2,
+    borderWidth: 1,
+    borderColor: colors.amberGlow,
+  },
+  scopeChipText: {
+    fontFamily: fonts.body,
+    fontSize: fontSizes.xs,
+    color: colors.amber,
+  },
+  clearBtn: { paddingHorizontal: spacing.xs },
+  clearBtnText: { fontFamily: fonts.body, color: colors.mist, fontSize: fontSizes.sm },
+
+  empty: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: spacing.xl,
+    gap: spacing.sm,
+  },
+  emptyTitle: {
+    fontFamily: fonts.title,
+    fontSize: fontSizes.lg,
+    color: colors.cream,
+    textAlign: 'center',
+  },
+  emptyHint: {
+    fontFamily: fonts.body,
+    fontSize: fontSizes.base,
+    color: colors.mist,
+    textAlign: 'center',
+    lineHeight: 22,
+  },
+
+  messageList: { padding: spacing.md, gap: spacing.xs },
+
+  rowUser:      { width: '100%', alignItems: 'flex-end',   marginBottom: spacing.xs },
+  rowAssistant: { width: '100%', alignItems: 'flex-start', marginBottom: spacing.xs },
+
+  bubbleUser: {
+    maxWidth: '80%',
+    borderRadius: radius.lg,
+    borderBottomRightRadius: radius.sm,
+    backgroundColor: colors.amberDim,
+    padding: spacing.sm,
+  },
+  bubbleTextUser: {
+    fontFamily: fonts.body,
+    fontSize: fontSizes.base,
+    color: colors.cream,
+    lineHeight: 21,
+  },
+  bubbleAssistant: {
+    backgroundColor: colors.charcoal,
+    borderRadius: radius.lg,
+    borderBottomLeftRadius: radius.sm,
+    borderWidth: 1,
+    borderColor: colors.border,
+    padding: spacing.sm,
+    maxWidth: '88%',
+  },
+  bubbleTextAssistant: {
+    fontFamily: fonts.body,
+    fontSize: fontSizes.base,
+    color: colors.cream,
+    lineHeight: 21,
+  },
+
+  streamingRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.xs,
+    paddingHorizontal: spacing.md,
+    paddingBottom: spacing.xxs,
+  },
+  streamingDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+    backgroundColor: colors.amber,
+  },
+  streamingText: {
+    fontFamily: fonts.body,
+    fontSize: fontSizes.xs,
+    color: colors.mist,
+  },
+
+  errorText: {
+    fontFamily: fonts.body,
+    color: colors.error,
+    fontSize: fontSizes.sm,
+    textAlign: 'center',
+    padding: spacing.xs,
+  },
+
   inputBar: {
     flexDirection: 'row',
     alignItems: 'flex-end',
-    padding: 10,
+    padding: spacing.sm,
     borderTopWidth: 1,
-    borderTopColor: '#f0f0f0',
-    gap: 8,
+    borderTopColor: colors.border,
+    gap: spacing.xs,
   },
   input: {
     flex: 1,
-    backgroundColor: '#f5f5f5',
-    borderRadius: 20,
-    paddingHorizontal: 14,
-    paddingVertical: 9,
-    fontSize: 15,
-    color: '#1a1a1a',
+    backgroundColor: colors.charcoal,
+    borderRadius: radius.xl,
+    borderWidth: 1,
+    borderColor: colors.border,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.xs + 2,
+    fontSize: fontSizes.base,
+    fontFamily: fonts.body,
+    color: colors.cream,
     maxHeight: 100,
   },
   sendBtn: {
-    width: 36,
-    height: 36,
-    borderRadius: 18,
-    backgroundColor: BLUE,
+    width: 38,
+    height: 38,
+    borderRadius: 19,
+    backgroundColor: colors.amber,
     alignItems: 'center',
     justifyContent: 'center',
   },
-  sendBtnDisabled: { backgroundColor: '#ccc' },
-  sendBtnText: { color: '#fff', fontSize: 18, fontWeight: '700', lineHeight: 20 },
+  sendBtnDisabled: { backgroundColor: colors.charcoal, borderWidth: 1, borderColor: colors.border },
+  sendBtnText: {
+    color: colors.midnight,
+    fontSize: fontSizes.lg,
+    fontFamily: fonts.bold,
+    lineHeight: 22,
+  },
 });

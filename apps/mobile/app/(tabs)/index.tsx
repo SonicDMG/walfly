@@ -1,17 +1,11 @@
 /**
  * Tab 1 — Record Screen
  *
- * Large record button. Tap to start, tap again to stop.
- * Location is captured concurrently with the recording and never gates it, so
- * the microphone is live within a moment of the tap.
- * Progress and wait states use react-native-progress for animated feedback.
- *
- * The pulse animation keeps `opacity` permanently bound to the Animated.Value —
- * swapping between an animated node and a literal forces the native driver to
- * detach and re-attach, which intermittently strands the button at low opacity.
+ * Dark-first. Minimal. A single confident button.
+ * Amber on Midnight — "the moments you were there for."
  */
 
-import React, { useRef, useEffect } from 'react';
+import { useRef, useEffect } from 'react';
 import {
   View,
   Text,
@@ -21,124 +15,126 @@ import {
 } from 'react-native';
 import * as Progress from 'react-native-progress';
 import { useRecordingUpload, RecordState } from '../../hooks/useRecordingUpload';
+import { colors, fonts, fontSizes, spacing, radius, shadow } from '../../lib/theme';
 
-const RED = '#E53935';
-const DARK = '#1a1a1a';
-const MUTED = '#888';
-
-/** States in which taps are ignored and the button renders dimmed. */
 const BUSY_STATES = new Set<RecordState>(['uploading', 'processing', 'requesting']);
 
 export default function RecordScreen() {
   const { state, error, progress, startRecording, stopAndUpload, reset } =
     useRecordingUpload();
 
-  // Pulse animation for recording state
   const pulseAnim = useRef(new Animated.Value(1)).current;
+  const glowAnim  = useRef(new Animated.Value(0)).current;
 
+  // Pulse + glow while recording
   useEffect(() => {
-    if (state !== 'recording') {
-      // Dimming is expressed through the same Animated.Value rather than a
-      // second style entry, so the node is never swapped for a literal.
-      pulseAnim.setValue(BUSY_STATES.has(state) ? 0.5 : 1);
-      return;
+    if (state === 'recording') {
+      const pulse = Animated.loop(
+        Animated.sequence([
+          Animated.timing(pulseAnim, { toValue: 0.7, duration: 800, useNativeDriver: true }),
+          Animated.timing(pulseAnim, { toValue: 1,   duration: 800, useNativeDriver: true }),
+        ]),
+      );
+      const glow = Animated.loop(
+        Animated.sequence([
+          Animated.timing(glowAnim, { toValue: 1, duration: 800, useNativeDriver: true }),
+          Animated.timing(glowAnim, { toValue: 0, duration: 800, useNativeDriver: true }),
+        ]),
+      );
+      pulse.start();
+      glow.start();
+      return () => { pulse.stop(); glow.stop(); pulseAnim.setValue(1); glowAnim.setValue(0); };
     }
-
-    const loop = Animated.loop(
-      Animated.sequence([
-        Animated.timing(pulseAnim, { toValue: 0.55, duration: 600, useNativeDriver: true }),
-        Animated.timing(pulseAnim, { toValue: 1, duration: 600, useNativeDriver: true }),
-      ]),
-    );
-    loop.start();
-
-    return () => {
-      loop.stop();
-      pulseAnim.setValue(1);
-    };
-  }, [state, pulseAnim]);
+    pulseAnim.setValue(BUSY_STATES.has(state) ? 0.5 : 1);
+    glowAnim.setValue(0);
+  }, [state, pulseAnim, glowAnim]);
 
   function handlePress() {
-    if (state === 'recording') {
-      void stopAndUpload();
-      return;
-    }
+    if (state === 'recording') { void stopAndUpload(); return; }
     if (state === 'idle' || state === 'error' || state === 'done') {
       void (async () => {
-        // reset() tears down any recorder left behind by a failed run before a
-        // new one can be prepared — expo-av allows only one at a time.
         if (state === 'error' || state === 'done') await reset();
         await startRecording();
       })();
     }
-    // 'uploading' / 'processing' / 'requesting' — ignore taps
   }
 
-  const isActive = state === 'recording';
-  const isBusy = BUSY_STATES.has(state);
-  const isDone = state === 'done';
+  const isRecording = state === 'recording';
+  const isBusy      = BUSY_STATES.has(state);
+  const isDone      = state === 'done';
+  const isError     = state === 'error';
+
+  const glowOpacity = glowAnim.interpolate({ inputRange: [0, 1], outputRange: [0.1, 0.45] });
+  const glowScale   = glowAnim.interpolate({ inputRange: [0, 1], outputRange: [1.1, 1.55] });
 
   return (
     <View style={styles.container}>
-      <Text style={styles.heading}>Walfly</Text>
-      <Text style={styles.subheading}>
-        {labelFor(state)}
-      </Text>
+      {/* Wordmark */}
+      <Text style={styles.wordmark}>walfly</Text>
+      <Text style={styles.tagline}>{labelFor(state)}</Text>
 
-      {/* Record button */}
-      <Pressable
-        onPress={handlePress}
-        disabled={isBusy}
-        style={styles.buttonWrapper}
-        accessibilityRole="button"
-        accessibilityLabel={isActive ? 'Stop recording' : 'Start recording'}
-      >
-        <Animated.View
-          style={[
-            styles.button,
-            isActive && styles.buttonActive,
-            isDone && styles.buttonDone,
-            { opacity: pulseAnim },
-          ]}
+      {/* Glow ring — only during recording */}
+      <View style={styles.buttonArea}>
+        {isRecording && (
+          <Animated.View
+            style={[
+              styles.glowRing,
+              { opacity: glowOpacity, transform: [{ scale: glowScale }] },
+            ]}
+          />
+        )}
+
+        <Pressable
+          onPress={handlePress}
+          disabled={isBusy}
+          accessibilityRole="button"
+          accessibilityLabel={isRecording ? 'Stop recording' : 'Start recording'}
         >
-        </Animated.View>
-      </Pressable>
+          <Animated.View
+            style={[
+              styles.button,
+              isRecording && styles.buttonRecording,
+              isDone       && styles.buttonDone,
+              isError      && styles.buttonError,
+              { opacity: pulseAnim },
+            ]}
+          >
+            {/* Inner dot / stop square */}
+            <View style={[
+              styles.buttonInner,
+              isRecording && styles.buttonInnerRecording,
+            ]} />
+          </Animated.View>
+        </Pressable>
+      </View>
 
-      {/* Progress bar — shown while uploading or processing */}
-      {isBusy && (
+      {/* Progress */}
+      {(state === 'uploading' || state === 'processing') && (
         <View style={styles.progressContainer}>
           <Progress.Bar
             progress={progress}
-            width={220}
-            height={6}
-            color={RED}
-            unfilledColor="#eee"
+            width={200}
+            height={2}
+            color={colors.amber}
+            unfilledColor={colors.border}
             borderWidth={0}
-            borderRadius={3}
+            borderRadius={1}
           />
-          <Text style={styles.progressLabel}>
-            {state === 'uploading' ? 'Uploading…' : 'Processing…'}
-          </Text>
         </View>
       )}
 
-      {/* Spinner shown while permissions are granted and the recorder prepares */}
       {state === 'requesting' && (
-        <View style={styles.progressContainer}>
-          <Progress.CircleSnail
-            color={[RED, '#888']}
-            size={32}
-            thickness={3}
-          />
-          <Text style={styles.progressLabel}>Starting…</Text>
-        </View>
+        <Progress.CircleSnail
+          color={[colors.amber, colors.mist]}
+          size={24}
+          thickness={2}
+        />
       )}
 
-      {/* Error state */}
-      {state === 'error' && error && (
+      {isError && error && (
         <View style={styles.errorBox}>
           <Text style={styles.errorText}>{error}</Text>
-          <Text style={styles.errorHint}>Tap to try again</Text>
+          <Text style={styles.errorHint}>tap to try again</Text>
         </View>
       )}
     </View>
@@ -147,77 +143,105 @@ export default function RecordScreen() {
 
 function labelFor(state: RecordState): string {
   switch (state) {
-    case 'idle': return 'Tap to record';
-    case 'requesting': return 'Starting…';
-    case 'recording': return 'Recording — tap to stop';
-    case 'uploading': return 'Uploading…';
-    case 'processing': return 'Processing…';
-    case 'done': return 'Done!';
-    case 'error': return 'Something went wrong';
+    case 'idle':       return 'tap to begin';
+    case 'requesting': return 'starting…';
+    case 'recording':  return 'recording — tap to stop';
+    case 'uploading':  return 'uploading…';
+    case 'processing': return 'processing…';
+    case 'done':       return 'saved';
+    case 'error':      return 'something went wrong';
   }
 }
+
+const BUTTON_SIZE = 128;
 
 const styles = StyleSheet.create({
   container: {
     flex: 1,
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: '#fff',
-    gap: 24,
+    backgroundColor: colors.midnight,
+    gap: spacing.lg,
   },
-  heading: {
-    fontSize: 28,
-    fontWeight: '700',
-    color: DARK,
-    letterSpacing: 1,
+  wordmark: {
+    fontFamily: fonts.display,
+    fontSize: fontSizes.xxl,
+    color: colors.cream,
+    letterSpacing: 2,
+    marginBottom: -spacing.sm,
   },
-  subheading: {
-    fontSize: 15,
-    color: MUTED,
-    marginTop: -16,
+  tagline: {
+    fontFamily: fonts.body,
+    fontSize: fontSizes.sm,
+    color: colors.mist,
+    letterSpacing: 0.5,
   },
-  buttonWrapper: {
-    marginVertical: 8,
-  },
-  button: {
-    width: 140,
-    height: 140,
-    borderRadius: 70,
-    backgroundColor: RED,
+  buttonArea: {
+    width: BUTTON_SIZE + 80,
+    height: BUTTON_SIZE + 80,
     alignItems: 'center',
     justifyContent: 'center',
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.12,
-    shadowRadius: 8,
-    elevation: 4,
+    marginVertical: spacing.md,
   },
-  buttonActive: {
-    // color stays red — shape change handled inline
+  glowRing: {
+    position: 'absolute',
+    width: BUTTON_SIZE,
+    height: BUTTON_SIZE,
+    borderRadius: BUTTON_SIZE / 2,
+    backgroundColor: colors.amber,
+  },
+  button: {
+    width: BUTTON_SIZE,
+    height: BUTTON_SIZE,
+    borderRadius: BUTTON_SIZE / 2,
+    backgroundColor: colors.obsidian,
+    borderWidth: 1.5,
+    borderColor: colors.border,
+    alignItems: 'center',
+    justifyContent: 'center',
+    ...shadow.md,
+  },
+  buttonRecording: {
+    borderColor: colors.amber,
+    backgroundColor: colors.obsidian,
+    ...shadow.glow,
   },
   buttonDone: {
-    backgroundColor: '#43A047',
+    borderColor: colors.success,
+  },
+  buttonError: {
+    borderColor: colors.error,
+  },
+  buttonInner: {
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    backgroundColor: colors.amber,
+  },
+  buttonInnerRecording: {
+    width: 22,
+    height: 22,
+    borderRadius: radius.sm,   // square when recording = "stop"
+    backgroundColor: colors.amber,
   },
   progressContainer: {
     alignItems: 'center',
-    gap: 8,
-  },
-  progressLabel: {
-    fontSize: 13,
-    color: MUTED,
+    marginTop: -spacing.xs,
   },
   errorBox: {
     alignItems: 'center',
-    paddingHorizontal: 24,
+    paddingHorizontal: spacing.xl,
   },
   errorText: {
-    color: RED,
-    fontSize: 14,
+    fontFamily: fonts.body,
+    color: colors.error,
+    fontSize: fontSizes.sm,
     textAlign: 'center',
   },
   errorHint: {
-    color: MUTED,
-    fontSize: 12,
-    marginTop: 4,
+    fontFamily: fonts.body,
+    color: colors.mist,
+    fontSize: fontSizes.xs,
+    marginTop: spacing.xxs,
   },
 });
