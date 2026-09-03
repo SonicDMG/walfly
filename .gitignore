@@ -32,3 +32,11 @@ npm-debug.log*
 next-env.d.ts
 tsconfig.json
 packages/api/sidecar/.venv/
+
+# Local tooling
+.beads/
+.bob/
+
+# React Native / Expo generated native projects
+apps/mobile/android/
+apps/mobile/ios/

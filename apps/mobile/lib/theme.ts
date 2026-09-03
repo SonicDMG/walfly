@@ -46,10 +46,10 @@ export type ColorToken = keyof typeof colors;
 // ---------------------------------------------------------------------------
 
 export const fonts = {
-  // Fraunces: optical variable serif — warmth, timelessness, editorial weight
+  // Playfair Display: editorial serif — warmth, timelessness, classic weight
   // Loaded via expo-font. Fallback: Georgia → serif
-  display:  'Fraunces_700Bold',
-  title:    'Fraunces_600SemiBold',
+  display:  'PlayfairDisplay_700Bold',
+  title:    'PlayfairDisplay_600SemiBold',
 
   // Inter: neutral, legible, system-native feel
   // Loaded via expo-font. Fallback: -apple-system → system

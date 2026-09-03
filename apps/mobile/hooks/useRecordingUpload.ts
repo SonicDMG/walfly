@@ -1,12 +1,11 @@
 /**
  * useRecordingUpload.ts
  *
- * The full record → upload → drive-the-pipeline lifecycle for expo-av 15.x on
- * Expo SDK 52, on web and on native.
+ * The full record → upload → drive-the-pipeline lifecycle on web and native.
  *
  * Contract this file enforces, and why each part exists:
  *   - Microphone permission is requested on every platform before recording;
- *     expo-av's iOS module rejects prepareToRecordAsync without it.
+ *     the iOS module rejects prepareToRecordAsync without it.
  *   - The iOS audio session is switched into record mode before recording and
  *     back out afterwards, so later playback is not routed to the earpiece.
  *   - Audio is captured at 32 kbps mono 22.05 kHz. Whisper resamples to 16 kHz
@@ -28,8 +27,15 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Platform } from 'react-native';
-import { Audio, InterruptionModeAndroid, InterruptionModeIOS } from 'expo-av';
-import * as FileSystem from 'expo-file-system';
+import {
+  AudioModule,
+  requestRecordingPermissionsAsync,
+  setAudioModeAsync,
+  AudioQuality,
+  IOSOutputFormat,
+  type RecordingOptions,
+} from 'expo-audio';
+import { File as ExpoFile } from 'expo-file-system';
 import {
   apiUrl,
   describeRequestError,
@@ -121,7 +127,7 @@ export function useRecordingUpload() {
   const [progress, setProgress] = useState(0);
 
   const mountedRef = useRef(true);
-  const recordingRef = useRef<Audio.Recording | null>(null);
+  const recordingRef = useRef<InstanceType<typeof AudioModule.AudioRecorder> | null>(null);
   const startedAtRef = useRef(0);
   const startTimestampRef = useRef('');
   const locationPromiseRef = useRef<Promise<LocationSnapshot | null> | null>(null);
@@ -151,17 +157,17 @@ export function useRecordingUpload() {
     }
   }, []);
 
-  /** Stops and unloads any live recorder. Never throws: teardown must always complete. */
+  /** Stops and removes any live recorder. Never throws: teardown must always complete. */
   const teardownRecorder = useCallback(async () => {
     const recording = recordingRef.current;
     recordingRef.current = null;
     if (!recording) return;
     try {
-      await recording.stopAndUnloadAsync();
+      await recording.stop();
     } catch {
-      // The recorder may already be unloaded; expo-av still clears its singleton.
+      // The recorder may already be stopped.
     }
-    const uri = recording.getURI();
+    const uri = recording.uri;
     if (Platform.OS === 'web' && uri?.startsWith('blob:')) URL.revokeObjectURL(uri);
   }, []);
 
@@ -191,7 +197,7 @@ export function useRecordingUpload() {
       // singleton claimed, which makes every later createAsync throw.
       await teardownRecorder();
 
-      const mic = await Audio.requestPermissionsAsync();
+      const mic = await requestRecordingPermissionsAsync();
       if (!mic.granted) {
         throw new Error(
           'Microphone permission denied. Enable microphone access for Walfly in your system settings.',
@@ -205,10 +211,12 @@ export function useRecordingUpload() {
       startTimestampRef.current = new Date().toISOString();
       startedAtRef.current = Date.now();
 
-      await Audio.setAudioModeAsync(RECORD_AUDIO_MODE);
+      await setAudioModeAsync(RECORD_AUDIO_MODE);
 
-      const { recording } = await Audio.Recording.createAsync(recordingOptions());
-      recordingRef.current = recording;
+      const recorder = new AudioModule.AudioRecorder(recordingOptions());
+      await recorder.prepareToRecordAsync();
+      recorder.record();
+      recordingRef.current = recorder;
       safeSetState('recording');
 
       maxDurationTimerRef.current = setTimeout(() => {
@@ -248,17 +256,16 @@ export function useRecordingUpload() {
       const elapsed = Date.now() - startedAtRef.current;
       if (elapsed < MIN_RECORDING_MS) await sleep(MIN_RECORDING_MS - elapsed);
 
-      let status: Audio.RecordingStatus | null = null;
       let stopError: unknown = null;
       try {
-        status = await recording.stopAndUnloadAsync();
+        await recording.stop();
       } catch (err) {
         stopError = err;
       }
 
-      // Must come after stopAndUnloadAsync: on web expo-av has no URI until the
+      // Must come after stop(): on web the URI isn't available until the
       // MediaRecorder blob exists.
-      const uri = recording.getURI();
+      const uri = recording.uri;
       if (Platform.OS === 'web' && uri?.startsWith('blob:')) webBlobUri = uri;
 
       // Put the iOS session back to playback before anything else can fail.
@@ -275,7 +282,7 @@ export function useRecordingUpload() {
 
       const durationSec = Math.max(
         1,
-        Math.round((status?.durationMillis || Date.now() - startedAtRef.current) / 1000),
+        Math.round((recording.currentTime * 1000 || Date.now() - startedAtRef.current) / 1000),
       );
 
       const formData = new FormData();
@@ -293,14 +300,10 @@ export function useRecordingUpload() {
       } else {
         // expo-av produces AAC in an MPEG-4 container on both iOS and Android.
         const shape = uploadShapeFor('audio/mp4');
-        const info = await FileSystem.getInfoAsync(uri);
-        byteSize = info.exists ? info.size : 0;
+        const fileRef = new ExpoFile(uri);
+        byteSize = fileRef.exists ? fileRef.size : 0;
         assertUploadSize(byteSize, durationSec, await fetchMaxUploadBytes());
-        formData.append('audio', {
-          uri,
-          name: `recording.${shape.ext}`,
-          type: shape.mime,
-        } as unknown as Blob);
+        formData.append('audio', fileRef, `recording.${shape.ext}`);
         formData.append('audioMimeType', shape.mime);
       }
 
@@ -392,56 +395,40 @@ export function useRecordingUpload() {
 // ─── Recording configuration ─────────────────────────────────────────────────
 
 const RECORD_AUDIO_MODE = {
-  allowsRecordingIOS: true,
-  playsInSilentModeIOS: true,
-  staysActiveInBackground: false,
-  interruptionModeIOS: InterruptionModeIOS.DoNotMix,
-  interruptionModeAndroid: InterruptionModeAndroid.DoNotMix,
-  shouldDuckAndroid: true,
-  playThroughEarpieceAndroid: false,
+  allowsRecording: true,
+  playsInSilentMode: true,
+  shouldPlayInBackground: false,
+  interruptionMode: 'doNotMix' as const,
 };
 
 const PLAYBACK_AUDIO_MODE = {
-  allowsRecordingIOS: false,
-  playsInSilentModeIOS: true,
-  staysActiveInBackground: false,
-  interruptionModeIOS: InterruptionModeIOS.MixWithOthers,
-  interruptionModeAndroid: InterruptionModeAndroid.DuckOthers,
-  shouldDuckAndroid: true,
-  playThroughEarpieceAndroid: false,
+  allowsRecording: false,
+  playsInSilentMode: true,
+  shouldPlayInBackground: false,
+  interruptionMode: 'mixWithOthers' as const,
 };
 
 /**
- * Speech-grade AAC. expo-av validates the android and ios blocks on every
- * platform, so both are always present even when only `web` is used.
+ * Speech-grade AAC. Both android and ios blocks are always present even when
+ * only `web` is used.
  */
-function recordingOptions(): Audio.RecordingOptions {
-  const shared = {
+function recordingOptions(): RecordingOptions {
+  const mimeType = Platform.OS === 'web' ? pickWebMimeType() : undefined;
+  return {
     isMeteringEnabled: false,
+    extension: '.m4a',
+    sampleRate: 22050,
+    numberOfChannels: 1,
+    bitRate: 32000,
     android: {
-      extension: '.m4a',
-      outputFormat: Audio.AndroidOutputFormat.MPEG_4,
-      audioEncoder: Audio.AndroidAudioEncoder.AAC,
-      sampleRate: 22050,
-      numberOfChannels: 1,
-      bitRate: 32000,
+      outputFormat: 'mpeg4' as const,
+      audioEncoder: 'aac' as const,
     },
     ios: {
-      extension: '.m4a',
-      outputFormat: Audio.IOSOutputFormat.MPEG4AAC,
-      audioQuality: Audio.IOSAudioQuality.MEDIUM,
-      sampleRate: 22050,
-      numberOfChannels: 1,
-      bitRate: 32000,
-      linearPCMBitDepth: 16,
-      linearPCMIsBigEndian: false,
-      linearPCMIsFloat: false,
+      outputFormat: IOSOutputFormat.MPEG4AAC,
+      audioQuality: AudioQuality.MEDIUM,
+      bitDepthHint: 16,
     },
-  };
-  if (Platform.OS !== 'web') return { ...shared, web: { bitsPerSecond: 32000 } };
-  const mimeType = pickWebMimeType();
-  return {
-    ...shared,
     web: { ...(mimeType ? { mimeType } : {}), bitsPerSecond: 32000 },
   };
 }
@@ -460,10 +447,10 @@ function pickWebMimeType(): string | undefined {
   return undefined;
 }
 
-/** Reverts the iOS record session so playback returns to the loudspeaker. */
+/** Reverts the iOS audio session so playback returns to the loudspeaker. */
 async function releaseIosRecordSession(): Promise<void> {
   try {
-    await Audio.setAudioModeAsync(PLAYBACK_AUDIO_MODE);
+    await setAudioModeAsync(PLAYBACK_AUDIO_MODE);
   } catch {
     // Session teardown must never mask the original failure.
   }

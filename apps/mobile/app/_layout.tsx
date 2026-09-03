@@ -4,9 +4,9 @@ import { StatusBar } from 'expo-status-bar';
 import * as SplashScreen from 'expo-splash-screen';
 import {
   useFonts,
-  Fraunces_600SemiBold,
-  Fraunces_700Bold,
-} from '@expo-google-fonts/fraunces';
+  PlayfairDisplay_600SemiBold,
+  PlayfairDisplay_700Bold,
+} from '@expo-google-fonts/playfair-display';
 import {
   Inter_400Regular,
   Inter_500Medium,
@@ -17,8 +17,8 @@ SplashScreen.preventAutoHideAsync();
 
 export default function RootLayout() {
   const [fontsLoaded] = useFonts({
-    Fraunces_600SemiBold,
-    Fraunces_700Bold,
+    PlayfairDisplay_600SemiBold,
+    PlayfairDisplay_700Bold,
     Inter_400Regular,
     Inter_500Medium,
     Inter_600SemiBold,

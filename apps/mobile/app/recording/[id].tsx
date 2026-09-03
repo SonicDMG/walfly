@@ -23,7 +23,7 @@ import {
   ActivityIndicator,
   Platform,
 } from 'react-native';
-import { Audio, InterruptionModeAndroid, InterruptionModeIOS } from 'expo-av';
+import { AudioModule, createAudioPlayer, setAudioModeAsync, type AudioStatus } from 'expo-audio';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import {
   apiUrl,
@@ -42,13 +42,10 @@ const BORDER = '#f0f0f0';
 
 /** Playback must not leave the session in record mode, or iOS routes to the earpiece. */
 const PLAYBACK_AUDIO_MODE = {
-  allowsRecordingIOS: false,
-  playsInSilentModeIOS: true,
-  staysActiveInBackground: false,
-  interruptionModeIOS: InterruptionModeIOS.MixWithOthers,
-  interruptionModeAndroid: InterruptionModeAndroid.DuckOthers,
-  shouldDuckAndroid: true,
-  playThroughEarpieceAndroid: false,
+  allowsRecording: false,
+  playsInSilentMode: true,
+  shouldPlayInBackground: false,
+  interruptionMode: 'mixWithOthers' as const,
 };
 
 type LoadError = { kind: 'notFound' } | { kind: 'other'; message: string };
@@ -392,16 +389,16 @@ function AudioPlayer({ url, contentType }: { url: string; contentType: string })
 }
 
 function NativeAudioPlayer({ url, contentType }: { url: string; contentType: string }) {
-  const soundRef = useRef<Audio.Sound | null>(null);
+  const playerRef = useRef<InstanceType<typeof AudioModule['AudioPlayer']> | null>(null);
   const [isPlaying, setIsPlaying] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     return () => {
-      const sound = soundRef.current;
-      soundRef.current = null;
-      void sound?.unloadAsync().catch(() => undefined);
+      const player = playerRef.current;
+      playerRef.current = null;
+      player?.remove();
     };
   }, [url]);
 
@@ -409,31 +406,28 @@ function NativeAudioPlayer({ url, contentType }: { url: string; contentType: str
     setError(null);
     setBusy(true);
     try {
-      if (soundRef.current) {
+      if (playerRef.current) {
         if (isPlaying) {
-          await soundRef.current.pauseAsync();
+          playerRef.current.pause();
           setIsPlaying(false);
         } else {
-          await soundRef.current.playAsync();
+          playerRef.current.play();
           setIsPlaying(true);
         }
         return;
       }
 
-      await Audio.setAudioModeAsync(PLAYBACK_AUDIO_MODE);
-      const { sound } = await Audio.Sound.createAsync(
-        { uri: url },
-        { shouldPlay: true },
-        (status) => {
-          if (!status.isLoaded) return;
-          setIsPlaying(status.isPlaying);
-          if (status.didJustFinish) {
-            setIsPlaying(false);
-            void sound.setPositionAsync(0).catch(() => undefined);
-          }
-        },
-      );
-      soundRef.current = sound;
+      await setAudioModeAsync(PLAYBACK_AUDIO_MODE);
+      const player = createAudioPlayer(url);
+      player.addListener('playbackStatusUpdate', (status: AudioStatus) => {
+        setIsPlaying(status.playing);
+        if (!status.playing && status.currentTime > 0 && status.currentTime >= status.duration) {
+          setIsPlaying(false);
+          void player.seekTo(0).catch(() => undefined);
+        }
+      });
+      playerRef.current = player;
+      player.play();
       setIsPlaying(true);
     } catch (err) {
       setError(

@@ -6,11 +6,6 @@
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "dark",
-    "splash": {
-      "image": "./assets/splash.png",
-      "resizeMode": "contain",
-      "backgroundColor": "#0D0D0F"
-    },
     "assetBundlePatterns": [
       "**/*"
     ],
@@ -31,9 +26,10 @@
       "favicon": "./assets/favicon.png"
     },
     "plugins": [
+      "expo-dev-client",
       "expo-router",
       [
-        "expo-av",
+        "expo-audio",
         {
           "microphonePermission": "Walfly uses the microphone to record conversations and meetings."
         }
@@ -51,7 +47,19 @@
             "usesCleartextTraffic": true
           }
         }
-      ]
+      ],
+      "expo-font",
+      [
+        "expo-splash-screen",
+        {
+          "image": "./assets/splash.png",
+          "resizeMode": "contain",
+          "backgroundColor": "#0D0D0F"
+        }
+      ],
+      "expo-status-bar",
+      "expo-web-browser",
+      "expo-audio"
     ],
     "scheme": "walfly"
   }

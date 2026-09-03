@@ -7,19 +7,24 @@
     "packages/*"
   ],
   "scripts": {
-    "dev": "concurrently -n sidecar,api,mobile -c magenta,blue,green \"uv run --project packages/api/sidecar python packages/api/sidecar/transcribe_sidecar.py\" \"npm run dev --workspace=packages/api\" \"npm run dev --workspace=apps/mobile\"",
-    "dev:api": "concurrently -n sidecar,api -c magenta,blue \"uv run --project packages/api/sidecar python packages/api/sidecar/transcribe_sidecar.py\" \"npm run dev --workspace=packages/api\"",
+    "dev": "concurrently -n sidecar,api,mobile -c magenta,blue,green \"uv run --project packages/api/sidecar python packages/api/sidecar/transcribe_sidecar.py\" \"npm run dev --workspace=packages/api -- --port 3030\" \"npm run dev --workspace=apps/mobile\"",
+    "ios": "cd apps/mobile && npx expo run:ios --no-bundler --device 'iPhone 17 Pro'",
+    "dev:api": "concurrently -n sidecar,api -c magenta,blue \"uv run --project packages/api/sidecar python packages/api/sidecar/transcribe_sidecar.py\" \"npm run dev --workspace=packages/api -- --port 3030\"",
     "dev:mobile": "npm run dev --workspace=apps/mobile",
     "build": "npm run build --workspace=packages/db && npm run build --workspace=packages/api && npm run build --workspace=apps/mobile",
     "build:api": "npm run build --workspace=packages/api",
     "build:mobile": "npm run build --workspace=apps/mobile"
   },
   "devDependencies": {
-    "concurrently": "^9.1.0"
+    "concurrently": "^9.1.0",
+    "expo-router": "~57.0.18"
   },
   "overrides": {
     "react": "^19.2.0",
     "react-dom": "^19.2.0",
+    "react-native": "0.86.3",
+    "react-native-reanimated": "4.5.1",
+    "react-native-worklets": "0.10.1",
     "@walfly/mobile": {
       "react": "18.3.1",
       "react-dom": "18.3.1"

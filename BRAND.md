@@ -90,18 +90,18 @@ Light mode inverts the warmth: background becomes `#FAF6EF` (warm parchment), su
 
 Two fonts. Both loaded via `expo-font` / `@expo-google-fonts`.
 
-### Fraunces — display & headings
+### Playfair Display — display & headings
 
-**Source:** [Google Fonts — Fraunces](https://fonts.google.com/specimen/Fraunces)
+**Source:** [Google Fonts — Playfair Display](https://fonts.google.com/specimen/Playfair+Display)
 **Weights used:** 600 SemiBold, 700 Bold
 
-Fraunces is a variable optical-size serif with soft ink traps and a warm editorial personality. It is used for:
+Playfair Display is a high-contrast transitional serif with classical proportions and strong editorial presence. It is used for:
 - App wordmark (`walfly`)
 - Screen titles (`moments`, `chat`, `record`)
 - Recording card titles in the list
 - Summary headings in recording detail
 
-**Why Fraunces:** It conveys timelessness and warmth — the feeling of a journal, a letter, something worth keeping. It is the "amber" of the type system.
+**Why Playfair Display:** It conveys timelessness and warmth — the feeling of a journal, a letter, something worth keeping. It is the "amber" of the type system.
 
 **Fallback:** `Georgia, serif`
 
@@ -112,7 +112,7 @@ Fraunces is a variable optical-size serif with soft ink traps and a warm editori
 
 Inter is used for all body text, labels, metadata, badges, inputs, and captions. It is optimised for screen legibility and feels native on iOS and Android.
 
-**Why Inter:** Maximum readability, neutral, widely recognised. It never competes with Fraunces — it supports it.
+**Why Inter:** Maximum readability, neutral, widely recognised. It never competes with Playfair Display — it supports it.
 
 **Fallback:** `-apple-system, system-ui, sans-serif`
 
@@ -120,8 +120,8 @@ Inter is used for all body text, labels, metadata, badges, inputs, and captions.
 
 | Token | Font | Weight | Size | Use |
 |---|---|---|---|---|
-| `display` | Fraunces | 700 | 36px | App wordmark, major display text |
-| `title` | Fraunces | 600 | 28px | Screen headers, card titles |
+| `display` | Playfair Display | 700 | 36px | App wordmark, major display text |
+| `title` | Playfair Display | 600 | 28px | Screen headers, card titles |
 | `headline` | Inter | 600 | 20px | Section headers |
 | `md` | Inter | 500 | 17px | Primary UI labels |
 | `base` | Inter | 400 | 15px | Body text |
