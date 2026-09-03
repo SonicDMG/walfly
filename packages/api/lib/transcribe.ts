@@ -9,7 +9,7 @@
  * the single-call contract the pipeline expects from transcribeAudio().
  *
  * Configuration:
- *   SIDECAR_URL  — base URL of the sidecar (default: http://localhost:5002)
+ *   SIDECAR_URL  — base URL of the sidecar (default: http://localhost:8888)
  *
  * Start the sidecar before running the API:
  *   cd packages/api/sidecar && uv run python transcribe_sidecar.py
@@ -41,7 +41,7 @@ export function isTranscriptionConfigured(): boolean {
 }
 
 function sidecarUrl(): string {
-  return (process.env.SIDECAR_URL ?? 'http://localhost:5002').replace(/\/+$/, '');
+  return (process.env.SIDECAR_URL ?? 'http://localhost:8888').replace(/\/+$/, '');
 }
 
 /**
