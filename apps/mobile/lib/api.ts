@@ -59,13 +59,13 @@ export function resolveAudioUrl(audioUrl: string): string {
  */
 export function describeRequestError(err: unknown, what: string): string {
   if (err instanceof TypeError) {
-    let base = '<unconfigured>';
     try {
-      base = apiBaseUrl();
+      apiBaseUrl(); // validate it is configured; throws if not
     } catch {
       return `${what}: ${MISSING_BASE_URL_MESSAGE}`;
     }
-    return `${what}: cannot reach the API at ${base}. Check that the Next.js server is running and that EXPO_PUBLIC_API_URL points at it.`;
+    // Don't include the internal base URL in user-visible strings (CWE-209)
+    return `${what}: cannot reach the API. Check that the Next.js server is running.`;
   }
   if (err instanceof Error) return err.message;
   return `${what}: ${String(err)}`;

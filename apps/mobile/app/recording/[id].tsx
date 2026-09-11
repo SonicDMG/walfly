@@ -11,7 +11,7 @@
  * and delete action with confirmation.
  */
 
-import React, { useState, useEffect, useCallback, useRef } from 'react';
+import React, { useState, useEffect, useCallback, useRef, useMemo, memo } from 'react';
 import {
   View,
   Text,
@@ -51,6 +51,9 @@ export default function RecordingDetailScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
   const router = useRouter();
 
+  // Validate id at mount — reject anything that isn't a UUID/hex id (CWE-22)
+  const safeId = id && /^[0-9a-f-]{1,64}$/i.test(id) ? id : null;
+
   const [recording, setRecording] = useState<Recording | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<LoadError | null>(null);
@@ -60,9 +63,10 @@ export default function RecordingDetailScreen() {
   const [editingNotes, setEditingNotes] = useState(false);
   const [notesDraft, setNotesDraft] = useState('');
   const [saving, setSaving] = useState(false);
-  const [checkedActions, setCheckedActions] = useState<Record<number, boolean>>({});
   const [tick, setTick] = useState(0);
   const mountedRef = useRef(true);
+  // Track in-flight title save to avoid duplicate PATCHes from onSubmitEditing+onBlur
+  const titleSavingRef = useRef(false);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -72,10 +76,10 @@ export default function RecordingDetailScreen() {
   }, []);
 
   const fetchRecording = useCallback(async (silent = false) => {
-    if (!id) return;
+    if (!safeId) return;
     if (!silent) setLoading(true);
     try {
-      const res = await fetch(apiUrl(`/api/recordings/${id}`));
+      const res = await fetch(apiUrl(`/api/recordings/${safeId}`));
       if (res.status === 404) {
         if (mountedRef.current) setLoadError({ kind: 'notFound' });
         return;
@@ -97,7 +101,7 @@ export default function RecordingDetailScreen() {
     } finally {
       if (mountedRef.current && !silent) setLoading(false);
     }
-  }, [id]);
+  }, [safeId]);
 
   useEffect(() => {
     void fetchRecording();
@@ -106,14 +110,14 @@ export default function RecordingDetailScreen() {
   // Keep ticking pipeline if recording is in a non-terminal processing state
   useEffect(() => {
     const status = recording?.status;
-    if (!id || !status || !isNonTerminal(status)) return;
+    if (!safeId || !status || !isNonTerminal(status)) return;
 
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout> | null = null;
 
     void (async () => {
       try {
-        const res = await fetch(apiUrl(`/api/recordings/${id}/process`), { method: 'POST' });
+        const res = await fetch(apiUrl(`/api/recordings/${safeId}/process`), { method: 'POST' });
         if (cancelled || !res.ok) return;
         const result = (await res.json()) as ProcessResponse;
         if (cancelled) return;
@@ -134,13 +138,13 @@ export default function RecordingDetailScreen() {
       cancelled = true;
       if (timer) clearTimeout(timer);
     };
-  }, [id, recording?.status, tick, fetchRecording]);
+  }, [safeId, recording?.status, tick, fetchRecording]);
 
   async function patch(fields: RecordingPatch) {
-    if (!id) return;
+    if (!safeId) return;
     setSaving(true);
     try {
-      const res = await fetch(apiUrl(`/api/recordings/${id}`), {
+      const res = await fetch(apiUrl(`/api/recordings/${safeId}`), {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(fields),
@@ -167,7 +171,7 @@ export default function RecordingDetailScreen() {
           style: 'destructive',
           onPress: async () => {
             try {
-              const res = await fetch(apiUrl(`/api/recordings/${id}`), { method: 'DELETE' });
+              const res = await fetch(apiUrl(`/api/recordings/${safeId}`), { method: 'DELETE' });
               if (!res.ok) throw new Error(`Delete failed (HTTP ${res.status})`);
               router.back();
             } catch (err) {
@@ -180,17 +184,31 @@ export default function RecordingDetailScreen() {
     );
   }
 
-  function toggleAction(index: number) {
-    setCheckedActions((prev) => ({
-      ...prev,
-      [index]: !prev[index],
-    }));
-  }
+  // Deduplicated title save — shared by onSubmitEditing and onBlur (CWE fix: race)
+  const handleTitleSave = useCallback(() => {
+    if (titleSavingRef.current) return;
+    setEditingTitle(false);
+    const trimmed = titleDraft.trim();
+    if (trimmed && trimmed !== recording?.title) {
+      titleSavingRef.current = true;
+      void patch({ title: trimmed }).finally(() => {
+        titleSavingRef.current = false;
+      });
+    }
+  }, [titleDraft, recording?.title]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  if (!id || loading) {
+  if (!safeId || loading) {
     return (
       <View style={styles.centered}>
         <ActivityIndicator size="large" color={colors.amber} />
+      </View>
+    );
+  }
+
+  if (!safeId) {
+    return (
+      <View style={styles.centered}>
+        <Text style={styles.emptyText}>recording not found</Text>
       </View>
     );
   }
@@ -199,7 +217,7 @@ export default function RecordingDetailScreen() {
     return (
       <View style={styles.centered}>
         <Text style={styles.emptyText}>
-          {loadError.kind === 'notFound' ? 'recording not found' : loadError.message}
+          {loadError.kind === 'notFound' ? 'recording not found' : 'could not load recording'}
         </Text>
         {loadError.kind === 'other' && (
           <Pressable style={styles.retryBtn} onPress={() => void fetchRecording()}>
@@ -218,8 +236,12 @@ export default function RecordingDetailScreen() {
     );
   }
 
-  const lines = (recording.transcript ?? '').split('\n').filter((l) => l.trim().length > 0);
-  const previewLines = lines.slice(0, 6);
+  // Memoize transcript processing — only recompute when transcript content changes
+  const lines = useMemo(
+    () => (recording.transcript ?? '').split('\n').filter((l) => l.trim().length > 0),
+    [recording.transcript],
+  );
+  const previewLines = useMemo(() => lines.slice(0, 6), [lines]);
   const displayedLines = transcriptExpanded ? lines : previewLines;
 
   return (
@@ -236,7 +258,7 @@ export default function RecordingDetailScreen() {
         </Pressable>
         <Pressable
           style={({ pressed }) => [styles.navChatBtn, pressed && styles.pressed]}
-          onPress={() => router.push(`/recording-chat?recordingId=${id}`)}
+          onPress={() => router.push({ pathname: '/recording-chat', params: { recordingId: safeId } })}
           accessibilityRole="button"
           accessibilityLabel="Chat about this recording"
         >
@@ -254,19 +276,9 @@ export default function RecordingDetailScreen() {
               onChangeText={setTitleDraft}
               autoFocus
               selectionColor={colors.amber}
-              onBlur={() => {
-                setEditingTitle(false);
-                if (titleDraft.trim() && titleDraft !== recording.title) {
-                  void patch({ title: titleDraft.trim() });
-                }
-              }}
+              onBlur={handleTitleSave}
               returnKeyType="done"
-              onSubmitEditing={() => {
-                setEditingTitle(false);
-                if (titleDraft.trim() && titleDraft !== recording.title) {
-                  void patch({ title: titleDraft.trim() });
-                }
-              }}
+              onSubmitEditing={handleTitleSave}
             />
           </View>
         ) : (
@@ -339,35 +351,9 @@ export default function RecordingDetailScreen() {
           </View>
         )}
 
-        {/* Action Items with Checkbox */}
+        {/* Action Items with Checkbox — state is local to ActionItemsList to avoid full-screen re-renders */}
         {recording.actionItems && recording.actionItems.length > 0 && (
-          <View style={styles.section}>
-            <Text style={styles.sectionHeader}>action items</Text>
-            <View style={styles.actionItemsList}>
-              {recording.actionItems.map((item, i) => {
-                const checked = !!checkedActions[i];
-                return (
-                  <Pressable
-                    key={i}
-                    style={({ pressed }) => [
-                      styles.actionItemRow,
-                      pressed && styles.pressed,
-                    ]}
-                    onPress={() => toggleAction(i)}
-                    accessibilityRole="checkbox"
-                    accessibilityState={{ checked }}
-                  >
-                    <View style={[styles.checkbox, checked && styles.checkboxChecked]}>
-                      {checked && <Text style={styles.checkmark}>✓</Text>}
-                    </View>
-                    <Text style={[styles.actionText, checked && styles.actionTextChecked]}>
-                      {item}
-                    </Text>
-                  </Pressable>
-                );
-              })}
-            </View>
-          </View>
+          <ActionItemsList items={recording.actionItems} />
         )}
 
         {/* Personal Notes */}
@@ -432,7 +418,7 @@ export default function RecordingDetailScreen() {
         {/* Chat Shortcut Button */}
         <Pressable
           style={({ pressed }) => [styles.chatActionBtn, pressed && styles.pressed]}
-          onPress={() => router.push(`/recording-chat?recordingId=${id}`)}
+          onPress={() => router.push({ pathname: '/recording-chat', params: { recordingId: safeId } })}
           accessibilityRole="button"
         >
           <Text style={styles.chatActionBtnText}>chat about this moment</Text>
@@ -455,9 +441,46 @@ export default function RecordingDetailScreen() {
   );
 }
 
+// ─── Action Items ─────────────────────────────────────────────────────────────
+
+function ActionItemsList({ items }: { items: string[] }) {
+  const [checkedActions, setCheckedActions] = useState<Record<number, boolean>>({});
+
+  function toggleAction(index: number) {
+    setCheckedActions((prev) => ({ ...prev, [index]: !prev[index] }));
+  }
+
+  return (
+    <View style={styles.section}>
+      <Text style={styles.sectionHeader}>action items</Text>
+      <View style={styles.actionItemsList}>
+        {items.map((item, i) => {
+          const checked = !!checkedActions[i];
+          return (
+            <Pressable
+              key={i}
+              style={({ pressed }) => [styles.actionItemRow, pressed && styles.pressed]}
+              onPress={() => toggleAction(i)}
+              accessibilityRole="checkbox"
+              accessibilityState={{ checked }}
+            >
+              <View style={[styles.checkbox, checked && styles.checkboxChecked]}>
+                {checked && <Text style={styles.checkmark}>✓</Text>}
+              </View>
+              <Text style={[styles.actionText, checked && styles.actionTextChecked]}>
+                {item}
+              </Text>
+            </Pressable>
+          );
+        })}
+      </View>
+    </View>
+  );
+}
+
 // ─── Transcript Line ─────────────────────────────────────────────────────────
 
-function TranscriptLine({ line, index }: { line: string; index: number }) {
+const TranscriptLine = memo(function TranscriptLine({ line, index }: { line: string; index: number }) {
   // Check if line contains a timestamp like [00:15] or 00:15 or [00:15 - 00:30]
   const tsMatch = line.match(/^(\[?(\d{1,2}:\d{2}(?::\d{2})?(?:\s*-\s*\d{1,2}:\d{2}(?::\d{2})?)?)\]?)(.*)$/);
   if (tsMatch) {
@@ -479,7 +502,7 @@ function TranscriptLine({ line, index }: { line: string; index: number }) {
       <Text style={styles.transcriptBody}>{line}</Text>
     </View>
   );
-}
+});
 
 // ─── Playback ────────────────────────────────────────────────────────────────
 
@@ -487,6 +510,30 @@ const WAVEFORM_BAR_HEIGHTS = [
   8, 14, 22, 10, 18, 28, 16, 24, 32, 20, 26, 12, 18, 30, 22, 14,
   20, 28, 16, 10, 24, 32, 18, 26, 14, 22, 30, 16, 12, 20, 28, 10,
 ];
+
+// Pre-computed style pairs per bar index. Built lazily on first render so the
+// colors token is available. Zero inline-object allocations during playback.
+let _waveformBarStyles: Array<{ active: object[]; inactive: object[] }> | null = null;
+function getWaveformBarStyles() {
+  if (!_waveformBarStyles) {
+    _waveformBarStyles = WAVEFORM_BAR_HEIGHTS.map((h) => ({
+      active:   [{ width: 3, borderRadius: 2, height: h, backgroundColor: colors.amber }],
+      inactive: [{ width: 3, borderRadius: 2, height: h, backgroundColor: colors.border }],
+    }));
+  }
+  return _waveformBarStyles;
+}
+
+const Waveform = memo(function Waveform({ activeBars }: { activeBars: number }) {
+  const barStyles = getWaveformBarStyles();
+  return (
+    <View style={styles.waveformContainer}>
+      {WAVEFORM_BAR_HEIGHTS.map((_h, i) => (
+        <View key={i} style={barStyles[i][i < activeBars ? 'active' : 'inactive']} />
+      ))}
+    </View>
+  );
+});
 
 function AudioPlayer({
   url,
@@ -500,17 +547,7 @@ function AudioPlayer({
   if (Platform.OS === 'web') {
     return (
       <View style={styles.heroPlayerCard}>
-        <View style={styles.waveformContainer}>
-          {WAVEFORM_BAR_HEIGHTS.map((h, i) => (
-            <View
-              key={i}
-              style={[
-                styles.waveformBar,
-                { height: h, backgroundColor: i < 12 ? colors.amber : colors.border },
-              ]}
-            />
-          ))}
-        </View>
+        <Waveform activeBars={12} />
         <View style={styles.webAudioWrapper}>
           {React.createElement('audio', {
             src: url,
@@ -540,9 +577,12 @@ function NativeAudioPlayer({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const totalDuration = duration || 0;
+  const totalDuration = duration ?? 0;
 
   useEffect(() => {
+    // Reset playback state when the audio source changes
+    setIsPlaying(false);
+    setCurrentTime(0);
     return () => {
       const player = playerRef.current;
       playerRef.current = null;
@@ -569,7 +609,8 @@ function NativeAudioPlayer({
       const player = createAudioPlayer(url);
       player.addListener('playbackStatusUpdate', (status: AudioStatus) => {
         setIsPlaying(status.playing);
-        if (status.currentTime) setCurrentTime(status.currentTime);
+        // Use typeof check — currentTime of 0 is valid (playback start, seek to beginning)
+        if (typeof status.currentTime === 'number') setCurrentTime(status.currentTime);
         if (!status.playing && status.currentTime > 0 && status.currentTime >= status.duration) {
           setIsPlaying(false);
           setCurrentTime(0);
@@ -580,10 +621,9 @@ function NativeAudioPlayer({
       player.play();
       setIsPlaying(true);
     } catch (err) {
+      // Omit contentType from user-visible string — it discloses server MIME type
       setError(
-        `Could not play audio (${contentType}): ${
-          err instanceof Error ? err.message : String(err)
-        }`,
+        `Could not play audio: ${err instanceof Error ? err.message : String(err)}`,
       );
       setIsPlaying(false);
     } finally {
@@ -593,27 +633,13 @@ function NativeAudioPlayer({
 
   const progressFraction = totalDuration > 0 ? Math.min(currentTime / totalDuration, 1) : 0;
   const activeBars = Math.floor(progressFraction * WAVEFORM_BAR_HEIGHTS.length);
+  // Memoize total duration label — constant for the component lifetime, no need to recompute at 10 Hz
+  const formattedTotal = useMemo(() => formatDuration(totalDuration), [totalDuration]);
 
   return (
     <View style={styles.heroPlayerCard}>
-      {/* Waveform graphic */}
-      <View style={styles.waveformContainer}>
-        {WAVEFORM_BAR_HEIGHTS.map((h, i) => {
-          const isBarActive = isPlaying ? i <= activeBars : false;
-          return (
-            <View
-              key={i}
-              style={[
-                styles.waveformBar,
-                {
-                  height: h,
-                  backgroundColor: isBarActive ? colors.amber : colors.border,
-                },
-              ]}
-            />
-          );
-        })}
-      </View>
+      {/* Waveform graphic — pre-computed styles, zero heap allocs during playback */}
+      <Waveform activeBars={activeBars} />
 
       {/* Controls row */}
       <View style={styles.playerControls}>
@@ -633,7 +659,7 @@ function NativeAudioPlayer({
 
         <View style={styles.playerInfo}>
           <Text style={styles.playerTimeText}>
-            {formatDuration(currentTime)} / {formatDuration(totalDuration)}
+            {formatDuration(currentTime)} / {formattedTotal}
           </Text>
           <Text style={styles.playerStatusText}>
             {isPlaying ? 'playing…' : 'tap to listen'}
