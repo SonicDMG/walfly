@@ -1,14 +1,14 @@
 /**
  * /recording/[id] — Recording Detail Screen
  *
- * Shows: audio playback, editable title, metadata, summary, key takeaways,
- * action items, collapsible transcript. Full CRUD: PATCH for edits, DELETE with
- * confirmation.
+ * Dark-first. Amber on Midnight. Walfly Design System.
  *
- * A missing recording and an unreachable API are different problems and are
- * reported differently — "Recording not found" for a genuine 404, a retry
- * affordance for anything else. The route param is undefined on the first
- * render of a cold deep link, so nothing is fetched until an id exists.
+ * Shows: audio playback with waveform visualisation & play/pause button,
+ * editable title with amber focus underline, status banner, metadata row,
+ * tags, summary in obsidian card, horizontally scrollable key takeaways chips,
+ * action items with checkbox UI, personal notes editor, collapsible transcript
+ * with timestamp markers & monospace styling, per-recording chat shortcut,
+ * and delete action with confirmation.
  */
 
 import React, { useState, useEffect, useCallback, useRef } from 'react';
@@ -35,10 +35,7 @@ import {
   type RecordingPatch,
   type RecordingStatus,
 } from '../../lib/api';
-
-const RED = '#E53935';
-const MUTED = '#888';
-const BORDER = '#f0f0f0';
+import { colors, fonts, fontSizes, spacing, radius, shadow } from '../../lib/theme';
 
 /** Playback must not leave the session in record mode, or iOS routes to the earpiece. */
 const PLAYBACK_AUDIO_MODE = {
@@ -63,6 +60,7 @@ export default function RecordingDetailScreen() {
   const [editingNotes, setEditingNotes] = useState(false);
   const [notesDraft, setNotesDraft] = useState('');
   const [saving, setSaving] = useState(false);
+  const [checkedActions, setCheckedActions] = useState<Record<number, boolean>>({});
   const [tick, setTick] = useState(0);
   const mountedRef = useRef(true);
 
@@ -105,10 +103,7 @@ export default function RecordingDetailScreen() {
     void fetchRecording();
   }, [fetchRecording]);
 
-  // Nothing advances a job on the server by itself. While this screen is open on
-  // a non-terminal recording it keeps ticking the pipeline, pacing itself with
-  // the retry hint the server returns. `tick` re-arms the effect without a
-  // spinner-visible refetch.
+  // Keep ticking pipeline if recording is in a non-terminal processing state
   useEffect(() => {
     const status = recording?.status;
     if (!id || !status || !isNonTerminal(status)) return;
@@ -131,7 +126,7 @@ export default function RecordingDetailScreen() {
           if (!cancelled) setTick((n) => n + 1);
         }, Math.min(Math.max(result.retryAfterMs, 2000), 8000));
       } catch {
-        // Self-healing is best-effort; the list screen retries too.
+        // Self-healing retry is best-effort
       }
     })();
 
@@ -163,7 +158,7 @@ export default function RecordingDetailScreen() {
 
   function handleDelete() {
     Alert.alert(
-      'Delete recording',
+      'delete moment',
       'This will permanently delete the recording and its audio. Are you sure?',
       [
         { text: 'Cancel', style: 'cancel' },
@@ -185,10 +180,17 @@ export default function RecordingDetailScreen() {
     );
   }
 
+  function toggleAction(index: number) {
+    setCheckedActions((prev) => ({
+      ...prev,
+      [index]: !prev[index],
+    }));
+  }
+
   if (!id || loading) {
     return (
       <View style={styles.centered}>
-        <ActivityIndicator size="large" color={RED} />
+        <ActivityIndicator size="large" color={colors.amber} />
       </View>
     );
   }
@@ -196,12 +198,12 @@ export default function RecordingDetailScreen() {
   if (loadError) {
     return (
       <View style={styles.centered}>
-        <Text style={styles.mutedText}>
-          {loadError.kind === 'notFound' ? 'Recording not found.' : loadError.message}
+        <Text style={styles.emptyText}>
+          {loadError.kind === 'notFound' ? 'recording not found' : loadError.message}
         </Text>
         {loadError.kind === 'other' && (
           <Pressable style={styles.retryBtn} onPress={() => void fetchRecording()}>
-            <Text style={styles.retryBtnText}>Try again</Text>
+            <Text style={styles.retryBtnText}>tap to retry</Text>
           </Pressable>
         )}
       </View>
@@ -211,188 +213,334 @@ export default function RecordingDetailScreen() {
   if (!recording) {
     return (
       <View style={styles.centered}>
-        <Text style={styles.mutedText}>Recording not found.</Text>
+        <Text style={styles.emptyText}>recording not found</Text>
       </View>
     );
   }
 
-  const lines = (recording.transcript ?? '').split('\n');
-  const previewLines = lines.slice(0, 6).join('\n');
+  const lines = (recording.transcript ?? '').split('\n').filter((l) => l.trim().length > 0);
+  const previewLines = lines.slice(0, 6);
+  const displayedLines = transcriptExpanded ? lines : previewLines;
 
   return (
-    <ScrollView style={styles.scroll} contentContainerStyle={styles.content}>
-      {/* Title */}
-      {editingTitle ? (
-        <View style={styles.editRow}>
-          <TextInput
-            style={styles.titleInput}
-            value={titleDraft}
-            onChangeText={setTitleDraft}
-            autoFocus
-            onBlur={() => {
-              setEditingTitle(false);
-              if (titleDraft !== recording.title) void patch({ title: titleDraft });
-            }}
-            returnKeyType="done"
-            onSubmitEditing={() => {
-              setEditingTitle(false);
-              if (titleDraft !== recording.title) void patch({ title: titleDraft });
-            }}
-          />
-        </View>
-      ) : (
-        <Pressable onPress={() => setEditingTitle(true)}>
-          <Text style={styles.title}>{recording.title}</Text>
-          <Text style={styles.editHint}>Tap to edit title</Text>
+    <View style={styles.screen}>
+      {/* Navigation Top Bar */}
+      <View style={styles.navBar}>
+        <Pressable
+          style={({ pressed }) => [styles.backBtn, pressed && styles.pressed]}
+          onPress={() => router.back()}
+          accessibilityRole="button"
+          accessibilityLabel="Back to moments"
+        >
+          <Text style={styles.backBtnText}>← moments</Text>
         </Pressable>
-      )}
-
-      {/* Pipeline status */}
-      <StatusBanner status={recording.status} error={recording.error} />
-
-      {/* Playback */}
-      <AudioPlayer
-        url={resolveAudioUrl(recording.audioUrl)}
-        contentType={recording.audioContentType}
-      />
-
-      {/* Metadata */}
-      <View style={styles.metaRow}>
-        <MetaChip label={formatDate(recording.createdAt)} />
-        {recording.duration ? <MetaChip label={formatDuration(recording.duration)} /> : null}
-        {recording.location?.placeName ? (
-          <MetaChip label={recording.location.placeName} />
-        ) : null}
+        <Pressable
+          style={({ pressed }) => [styles.navChatBtn, pressed && styles.pressed]}
+          onPress={() => router.push(`/recording-chat?recordingId=${id}`)}
+          accessibilityRole="button"
+          accessibilityLabel="Chat about this recording"
+        >
+          <Text style={styles.navChatBtnText}>chat ↗</Text>
+        </Pressable>
       </View>
 
-      {/* Tags */}
-      {recording.tags.length > 0 && (
-        <View style={styles.tagRow}>
-          {recording.tags.map((tag) => (
-            <View key={tag} style={styles.tag}>
-              <Text style={styles.tagText}>{tag}</Text>
-            </View>
-          ))}
-        </View>
-      )}
-
-      <Divider />
-
-      {/* Summary */}
-      {recording.summary && (
-        <Section title="Summary">
-          <Text style={styles.bodyText}>{recording.summary}</Text>
-        </Section>
-      )}
-
-      {/* Key Takeaways */}
-      {recording.keyTakeaways.length > 0 && (
-        <Section title="Key Takeaways">
-          {recording.keyTakeaways.map((item, i) => (
-            <BulletItem key={i} text={item} />
-          ))}
-        </Section>
-      )}
-
-      {/* Action Items */}
-      {recording.actionItems.length > 0 && (
-        <Section title="Action Items">
-          {recording.actionItems.map((item, i) => (
-            <BulletItem key={i} text={item} icon="☐" />
-          ))}
-        </Section>
-      )}
-
-      {/* Notes */}
-      <Section title="Notes">
-        {editingNotes ? (
-          <TextInput
-            style={styles.notesInput}
-            value={notesDraft}
-            onChangeText={setNotesDraft}
-            multiline
-            autoFocus
-            onBlur={() => {
-              setEditingNotes(false);
-              if (notesDraft !== recording.notes) void patch({ notes: notesDraft });
-            }}
-          />
+      <ScrollView style={styles.scroll} contentContainerStyle={styles.content}>
+        {/* Title — Editable inline */}
+        {editingTitle ? (
+          <View style={styles.editRow}>
+            <TextInput
+              style={styles.titleInput}
+              value={titleDraft}
+              onChangeText={setTitleDraft}
+              autoFocus
+              selectionColor={colors.amber}
+              onBlur={() => {
+                setEditingTitle(false);
+                if (titleDraft.trim() && titleDraft !== recording.title) {
+                  void patch({ title: titleDraft.trim() });
+                }
+              }}
+              returnKeyType="done"
+              onSubmitEditing={() => {
+                setEditingTitle(false);
+                if (titleDraft.trim() && titleDraft !== recording.title) {
+                  void patch({ title: titleDraft.trim() });
+                }
+              }}
+            />
+          </View>
         ) : (
-          <Pressable onPress={() => setEditingNotes(true)}>
-            <Text style={[styles.bodyText, !recording.notes && { color: MUTED }]}>
-              {recording.notes || 'Tap to add notes…'}
-            </Text>
+          <Pressable
+            style={({ pressed }) => [styles.titleContainer, pressed && styles.pressed]}
+            onPress={() => setEditingTitle(true)}
+          >
+            <Text style={styles.title}>{recording.title}</Text>
+            <Text style={styles.editHint}>tap to edit title</Text>
           </Pressable>
         )}
-      </Section>
 
-      <Divider />
+        {/* Status banner (non-ready states) */}
+        <StatusBanner status={recording.status} error={recording.error} />
 
-      {/* Transcript */}
-      {recording.transcript && (
-        <Section title="Transcript">
-          <Text style={styles.transcriptText}>
-            {transcriptExpanded ? recording.transcript : previewLines}
-          </Text>
-          <Pressable
-            style={styles.expandBtn}
-            onPress={() => setTranscriptExpanded((v) => !v)}
-          >
-            <Text style={styles.expandBtnText}>
-              {transcriptExpanded ? 'Show less ↑' : 'Show full transcript ↓'}
-            </Text>
-          </Pressable>
-        </Section>
-      )}
+        {/* Metadata row */}
+        <View style={styles.metaRow}>
+          <MetaChip label={formatDate(recording.createdAt)} />
+          {recording.duration ? <MetaChip label={formatDuration(recording.duration)} /> : null}
+          {recording.location?.placeName ? (
+            <MetaChip label={recording.location.placeName} />
+          ) : null}
+        </View>
 
-      <Divider />
+        {/* Tags */}
+        {recording.tags && recording.tags.length > 0 && (
+          <View style={styles.tagRow}>
+            {recording.tags.map((tag) => (
+              <View key={tag} style={styles.tag}>
+                <Text style={styles.tagText}>{tag.toLowerCase()}</Text>
+              </View>
+            ))}
+          </View>
+        )}
 
-      {/* Chat link */}
-      <Pressable
-        style={styles.chatBtn}
-        onPress={() => router.push(`/recording-chat?recordingId=${id}`)}
-      >
-        <Text style={styles.chatBtnText}>💬  Chat about this recording</Text>
-      </Pressable>
+        {/* Hero Audio Player with Waveform */}
+        <AudioPlayer
+          url={resolveAudioUrl(recording.audioUrl)}
+          contentType={recording.audioContentType}
+          duration={recording.duration}
+        />
 
-      {/* Delete */}
-      <Pressable style={styles.deleteBtn} onPress={handleDelete} disabled={saving}>
-        <Text style={styles.deleteBtnText}>Delete recording</Text>
-      </Pressable>
+        {/* Summary Card */}
+        {recording.summary ? (
+          <View style={styles.summaryCard}>
+            <View style={styles.summaryHeader}>
+              <View style={styles.summaryDot} />
+              <Text style={styles.sectionHeader}>summary</Text>
+            </View>
+            <Text style={styles.summaryText}>{recording.summary}</Text>
+          </View>
+        ) : null}
 
-      <View style={{ height: 40 }} />
-    </ScrollView>
+        {/* Key Takeaways — horizontal chips */}
+        {recording.keyTakeaways && recording.keyTakeaways.length > 0 && (
+          <View style={styles.section}>
+            <Text style={styles.sectionHeader}>key takeaways</Text>
+            <ScrollView
+              horizontal
+              showsHorizontalScrollIndicator={false}
+              contentContainerStyle={styles.takeawaysScroll}
+            >
+              {recording.keyTakeaways.map((item, i) => (
+                <View key={i} style={styles.takeawayChip}>
+                  <View style={styles.takeawayDot} />
+                  <Text style={styles.takeawayText}>{item}</Text>
+                </View>
+              ))}
+            </ScrollView>
+          </View>
+        )}
+
+        {/* Action Items with Checkbox */}
+        {recording.actionItems && recording.actionItems.length > 0 && (
+          <View style={styles.section}>
+            <Text style={styles.sectionHeader}>action items</Text>
+            <View style={styles.actionItemsList}>
+              {recording.actionItems.map((item, i) => {
+                const checked = !!checkedActions[i];
+                return (
+                  <Pressable
+                    key={i}
+                    style={({ pressed }) => [
+                      styles.actionItemRow,
+                      pressed && styles.pressed,
+                    ]}
+                    onPress={() => toggleAction(i)}
+                    accessibilityRole="checkbox"
+                    accessibilityState={{ checked }}
+                  >
+                    <View style={[styles.checkbox, checked && styles.checkboxChecked]}>
+                      {checked && <Text style={styles.checkmark}>✓</Text>}
+                    </View>
+                    <Text style={[styles.actionText, checked && styles.actionTextChecked]}>
+                      {item}
+                    </Text>
+                  </Pressable>
+                );
+              })}
+            </View>
+          </View>
+        )}
+
+        {/* Personal Notes */}
+        <View style={styles.section}>
+          <Text style={styles.sectionHeader}>notes</Text>
+          {editingNotes ? (
+            <TextInput
+              style={styles.notesInput}
+              value={notesDraft}
+              onChangeText={setNotesDraft}
+              placeholder="add thoughts or context…"
+              placeholderTextColor={colors.fog}
+              multiline
+              autoFocus
+              selectionColor={colors.amber}
+              onBlur={() => {
+                setEditingNotes(false);
+                if (notesDraft !== (recording.notes ?? '')) {
+                  void patch({ notes: notesDraft });
+                }
+              }}
+            />
+          ) : (
+            <Pressable
+              style={({ pressed }) => [styles.notesCard, pressed && styles.pressed]}
+              onPress={() => setEditingNotes(true)}
+            >
+              <Text style={[styles.notesText, !recording.notes && styles.notesPlaceholder]}>
+                {recording.notes || 'tap to add notes…'}
+              </Text>
+            </Pressable>
+          )}
+        </View>
+
+        {/* Collapsible Transcript with Timestamps */}
+        {recording.transcript ? (
+          <View style={styles.section}>
+            <View style={styles.transcriptHeaderRow}>
+              <Text style={styles.sectionHeader}>transcript</Text>
+              <Text style={styles.transcriptCount}>
+                {lines.length} {lines.length === 1 ? 'segment' : 'segments'}
+              </Text>
+            </View>
+            <View style={styles.transcriptContainer}>
+              {displayedLines.map((line, index) => (
+                <TranscriptLine key={index} line={line} index={index} />
+              ))}
+            </View>
+            {lines.length > 6 && (
+              <Pressable
+                style={({ pressed }) => [styles.expandBtn, pressed && styles.pressed]}
+                onPress={() => setTranscriptExpanded((v) => !v)}
+              >
+                <Text style={styles.expandBtnText}>
+                  {transcriptExpanded ? 'show less ↑' : `show full transcript (${lines.length} lines) ↓`}
+                </Text>
+              </Pressable>
+            )}
+          </View>
+        ) : null}
+
+        {/* Chat Shortcut Button */}
+        <Pressable
+          style={({ pressed }) => [styles.chatActionBtn, pressed && styles.pressed]}
+          onPress={() => router.push(`/recording-chat?recordingId=${id}`)}
+          accessibilityRole="button"
+        >
+          <Text style={styles.chatActionBtnText}>chat about this moment</Text>
+          <Text style={styles.chatActionBtnArrow}>→</Text>
+        </Pressable>
+
+        {/* Delete Moment */}
+        <Pressable
+          style={({ pressed }) => [styles.deleteBtn, pressed && styles.pressed]}
+          onPress={handleDelete}
+          disabled={saving}
+          accessibilityRole="button"
+        >
+          <Text style={styles.deleteBtnText}>delete moment</Text>
+        </Pressable>
+
+        <View style={{ height: spacing['3xl'] }} />
+      </ScrollView>
+    </View>
+  );
+}
+
+// ─── Transcript Line ─────────────────────────────────────────────────────────
+
+function TranscriptLine({ line, index }: { line: string; index: number }) {
+  // Check if line contains a timestamp like [00:15] or 00:15 or [00:15 - 00:30]
+  const tsMatch = line.match(/^(\[?(\d{1,2}:\d{2}(?::\d{2})?(?:\s*-\s*\d{1,2}:\d{2}(?::\d{2})?)?)\]?)(.*)$/);
+  if (tsMatch) {
+    const timestamp = tsMatch[1].replace(/[\[\]]/g, '');
+    const text = tsMatch[3].trim();
+    return (
+      <View style={styles.transcriptLine}>
+        <View style={styles.timestampBadge}>
+          <Text style={styles.timestampText}>{timestamp}</Text>
+        </View>
+        <Text style={styles.transcriptBody}>{text}</Text>
+      </View>
+    );
+  }
+
+  return (
+    <View style={styles.transcriptLine}>
+      <Text style={styles.transcriptLineIndex}>{String(index + 1).padStart(2, '0')}</Text>
+      <Text style={styles.transcriptBody}>{line}</Text>
+    </View>
   );
 }
 
 // ─── Playback ────────────────────────────────────────────────────────────────
 
-/**
- * Web renders a real <audio> element (react-native-web renders to the DOM, so
- * the host component passes straight through). Native uses expo-av's Sound,
- * loaded lazily on the first play so opening the screen costs no network.
- */
-function AudioPlayer({ url, contentType }: { url: string; contentType: string }) {
+const WAVEFORM_BAR_HEIGHTS = [
+  8, 14, 22, 10, 18, 28, 16, 24, 32, 20, 26, 12, 18, 30, 22, 14,
+  20, 28, 16, 10, 24, 32, 18, 26, 14, 22, 30, 16, 12, 20, 28, 10,
+];
+
+function AudioPlayer({
+  url,
+  contentType,
+  duration,
+}: {
+  url: string;
+  contentType: string;
+  duration?: number;
+}) {
   if (Platform.OS === 'web') {
     return (
-      <View style={styles.playerRow}>
-        {React.createElement('audio', {
-          src: url,
-          controls: true,
-          preload: 'none',
-          style: { width: '100%' },
-        })}
+      <View style={styles.heroPlayerCard}>
+        <View style={styles.waveformContainer}>
+          {WAVEFORM_BAR_HEIGHTS.map((h, i) => (
+            <View
+              key={i}
+              style={[
+                styles.waveformBar,
+                { height: h, backgroundColor: i < 12 ? colors.amber : colors.border },
+              ]}
+            />
+          ))}
+        </View>
+        <View style={styles.webAudioWrapper}>
+          {React.createElement('audio', {
+            src: url,
+            controls: true,
+            preload: 'none',
+            style: { width: '100%', height: 36 },
+          })}
+        </View>
       </View>
     );
   }
-  return <NativeAudioPlayer url={url} contentType={contentType} />;
+  return <NativeAudioPlayer url={url} contentType={contentType} duration={duration} />;
 }
 
-function NativeAudioPlayer({ url, contentType }: { url: string; contentType: string }) {
+function NativeAudioPlayer({
+  url,
+  contentType,
+  duration,
+}: {
+  url: string;
+  contentType: string;
+  duration?: number;
+}) {
   const playerRef = useRef<InstanceType<typeof AudioModule['AudioPlayer']> | null>(null);
   const [isPlaying, setIsPlaying] = useState(false);
+  const [currentTime, setCurrentTime] = useState(0);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  const totalDuration = duration || 0;
 
   useEffect(() => {
     return () => {
@@ -421,8 +569,10 @@ function NativeAudioPlayer({ url, contentType }: { url: string; contentType: str
       const player = createAudioPlayer(url);
       player.addListener('playbackStatusUpdate', (status: AudioStatus) => {
         setIsPlaying(status.playing);
+        if (status.currentTime) setCurrentTime(status.currentTime);
         if (!status.playing && status.currentTime > 0 && status.currentTime >= status.duration) {
           setIsPlaying(false);
+          setCurrentTime(0);
           void player.seekTo(0).catch(() => undefined);
         }
       });
@@ -431,7 +581,7 @@ function NativeAudioPlayer({ url, contentType }: { url: string; contentType: str
       setIsPlaying(true);
     } catch (err) {
       setError(
-        `Could not play this recording (${contentType}): ${
+        `Could not play audio (${contentType}): ${
           err instanceof Error ? err.message : String(err)
         }`,
       );
@@ -441,17 +591,56 @@ function NativeAudioPlayer({ url, contentType }: { url: string; contentType: str
     }
   }
 
+  const progressFraction = totalDuration > 0 ? Math.min(currentTime / totalDuration, 1) : 0;
+  const activeBars = Math.floor(progressFraction * WAVEFORM_BAR_HEIGHTS.length);
+
   return (
-    <View style={styles.playerRow}>
-      <Pressable
-        style={styles.playBtn}
-        onPress={() => void toggle()}
-        disabled={busy}
-        accessibilityRole="button"
-        accessibilityLabel={isPlaying ? 'Pause recording' : 'Play recording'}
-      >
-        <Text style={styles.playBtnText}>{isPlaying ? '❚❚  Pause' : '▶  Play'}</Text>
-      </Pressable>
+    <View style={styles.heroPlayerCard}>
+      {/* Waveform graphic */}
+      <View style={styles.waveformContainer}>
+        {WAVEFORM_BAR_HEIGHTS.map((h, i) => {
+          const isBarActive = isPlaying ? i <= activeBars : false;
+          return (
+            <View
+              key={i}
+              style={[
+                styles.waveformBar,
+                {
+                  height: h,
+                  backgroundColor: isBarActive ? colors.amber : colors.border,
+                },
+              ]}
+            />
+          );
+        })}
+      </View>
+
+      {/* Controls row */}
+      <View style={styles.playerControls}>
+        <Pressable
+          style={({ pressed }) => [
+            styles.heroPlayBtn,
+            isPlaying && styles.heroPlayBtnActive,
+            pressed && styles.pressed,
+          ]}
+          onPress={() => void toggle()}
+          disabled={busy}
+          accessibilityRole="button"
+          accessibilityLabel={isPlaying ? 'Pause recording' : 'Play recording'}
+        >
+          <Text style={styles.heroPlayIcon}>{isPlaying ? '❚❚' : '▶'}</Text>
+        </Pressable>
+
+        <View style={styles.playerInfo}>
+          <Text style={styles.playerTimeText}>
+            {formatDuration(currentTime)} / {formatDuration(totalDuration)}
+          </Text>
+          <Text style={styles.playerStatusText}>
+            {isPlaying ? 'playing…' : 'tap to listen'}
+          </Text>
+        </View>
+      </View>
+
       {error ? <Text style={styles.playerError}>{error}</Text> : null}
     </View>
   );
@@ -460,11 +649,11 @@ function NativeAudioPlayer({ url, contentType }: { url: string; contentType: str
 // ─── Sub-components ──────────────────────────────────────────────────────────
 
 const STATUS_LABELS: Record<RecordingStatus, string> = {
-  uploaded: 'Queued for transcription',
-  transcribing: 'Transcribing…',
-  enriching: 'Writing the summary…',
-  ready: 'Ready',
-  failed: 'Processing failed',
+  uploaded:     'queued for transcription',
+  transcribing: 'transcribing…',
+  enriching:    'writing summary…',
+  ready:        'ready',
+  failed:       'processing failed',
 };
 
 function StatusBanner({ status, error }: { status: RecordingStatus; error: string | null }) {
@@ -472,26 +661,10 @@ function StatusBanner({ status, error }: { status: RecordingStatus; error: strin
   const failed = status === 'failed';
   return (
     <View style={[styles.banner, failed ? styles.bannerFailed : styles.bannerPending]}>
-      <Text style={[styles.bannerText, failed && { color: RED }]}>{STATUS_LABELS[status]}</Text>
+      <Text style={[styles.bannerText, failed ? styles.bannerTextFailed : styles.bannerTextPending]}>
+        {STATUS_LABELS[status]}
+      </Text>
       {failed && error ? <Text style={styles.bannerDetail}>{error}</Text> : null}
-    </View>
-  );
-}
-
-function Section({ title, children }: { title: string; children: React.ReactNode }) {
-  return (
-    <View style={styles.section}>
-      <Text style={styles.sectionTitle}>{title}</Text>
-      {children}
-    </View>
-  );
-}
-
-function BulletItem({ text, icon = '•' }: { text: string; icon?: string }) {
-  return (
-    <View style={styles.bulletRow}>
-      <Text style={styles.bulletIcon}>{icon}</Text>
-      <Text style={styles.bulletText}>{text}</Text>
     </View>
   );
 }
@@ -502,10 +675,6 @@ function MetaChip({ label }: { label: string }) {
       <Text style={styles.metaChipText}>{label}</Text>
     </View>
   );
-}
-
-function Divider() {
-  return <View style={styles.divider} />;
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -519,103 +688,492 @@ function formatDate(iso: string): string {
 
 function formatDuration(seconds: number): string {
   const m = Math.floor(seconds / 60);
-  const s = seconds % 60;
+  const s = Math.floor(seconds % 60);
   return `${m}:${String(s).padStart(2, '0')}`;
 }
 
 // ─── Styles ──────────────────────────────────────────────────────────────────
 
 const styles = StyleSheet.create({
-  scroll: { flex: 1, backgroundColor: '#fff' },
-  content: { padding: 20 },
-  centered: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: 24, gap: 12 },
-  mutedText: { color: MUTED, fontSize: 15, textAlign: 'center' },
+  screen: {
+    flex: 1,
+    backgroundColor: colors.midnight,
+  },
+  scroll: {
+    flex: 1,
+  },
+  content: {
+    paddingHorizontal: spacing.md,
+    paddingTop: spacing.xs,
+    paddingBottom: spacing.xl,
+    gap: spacing.lg,
+  },
+  centered: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: colors.midnight,
+    padding: spacing.xl,
+    gap: spacing.sm,
+  },
+  emptyText: {
+    fontFamily: fonts.body,
+    fontSize: fontSizes.base,
+    color: colors.mist,
+  },
+  pressed: {
+    opacity: 0.75,
+  },
+
+  // Navigation
+  navBar: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: spacing.md,
+    paddingTop: spacing.lg,
+    paddingBottom: spacing.xs,
+  },
+  backBtn: {
+    paddingVertical: spacing.xs,
+  },
+  backBtnText: {
+    fontFamily: fonts.bodyMed,
+    fontSize: fontSizes.base,
+    color: colors.amber,
+  },
+  navChatBtn: {
+    backgroundColor: colors.amberSubtle,
+    borderRadius: radius.full,
+    paddingHorizontal: spacing.sm,
+    paddingVertical: 4,
+    borderWidth: 1,
+    borderColor: colors.amberGlow,
+  },
+  navChatBtnText: {
+    fontFamily: fonts.bodyMed,
+    fontSize: fontSizes.xs,
+    color: colors.amber,
+  },
 
   retryBtn: {
-    paddingHorizontal: 16,
-    paddingVertical: 8,
-    borderRadius: 8,
-    backgroundColor: '#f5f5f5',
-  },
-  retryBtnText: { color: RED, fontWeight: '600', fontSize: 14 },
-
-  title: { fontSize: 22, fontWeight: '700', color: '#1a1a1a', marginBottom: 2 },
-  editHint: { fontSize: 11, color: MUTED, marginBottom: 8 },
-  editRow: { marginBottom: 8 },
-  titleInput: {
-    fontSize: 22,
-    fontWeight: '700',
-    color: '#1a1a1a',
-    borderBottomWidth: 2,
-    borderBottomColor: RED,
-    paddingBottom: 2,
-  },
-
-  banner: { borderRadius: 8, padding: 10, marginBottom: 10 },
-  bannerPending: { backgroundColor: '#FFF8E1' },
-  bannerFailed: { backgroundColor: RED + '11' },
-  bannerText: { fontSize: 13, fontWeight: '600', color: '#8a6d00' },
-  bannerDetail: { fontSize: 12, color: '#555', marginTop: 4 },
-
-  playerRow: { marginBottom: 12, gap: 8 },
-  playBtn: {
-    alignSelf: 'flex-start',
-    backgroundColor: '#f5f5f5',
-    paddingHorizontal: 18,
-    paddingVertical: 10,
-    borderRadius: 24,
-  },
-  playBtnText: { fontSize: 15, fontWeight: '600', color: '#1a1a1a' },
-  playerError: { fontSize: 12, color: RED },
-
-  metaRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginVertical: 8 },
-  metaChip: {
-    backgroundColor: '#f5f5f5',
-    paddingHorizontal: 10,
-    paddingVertical: 4,
-    borderRadius: 12,
-  },
-  metaChipText: { fontSize: 12, color: '#555' },
-
-  tagRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginBottom: 8 },
-  tag: { backgroundColor: RED + '22', paddingHorizontal: 10, paddingVertical: 4, borderRadius: 12 },
-  tagText: { fontSize: 12, color: RED, fontWeight: '500' },
-
-  section: { marginBottom: 20 },
-  sectionTitle: { fontSize: 13, fontWeight: '700', color: MUTED, textTransform: 'uppercase', letterSpacing: 0.8, marginBottom: 8 },
-
-  bodyText: { fontSize: 15, color: '#333', lineHeight: 22 },
-
-  bulletRow: { flexDirection: 'row', alignItems: 'flex-start', marginBottom: 6 },
-  bulletIcon: { fontSize: 15, color: MUTED, marginRight: 8, marginTop: 1 },
-  bulletText: { fontSize: 15, color: '#333', flex: 1, lineHeight: 22 },
-
-  notesInput: {
-    fontSize: 15,
-    color: '#333',
-    lineHeight: 22,
+    marginTop: spacing.xs,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.xs,
+    borderRadius: radius.sm,
+    backgroundColor: colors.charcoal,
     borderWidth: 1,
-    borderColor: '#ddd',
-    borderRadius: 8,
-    padding: 10,
-    minHeight: 80,
+    borderColor: colors.border,
+  },
+  retryBtnText: {
+    fontFamily: fonts.bodyMed,
+    color: colors.amber,
+    fontSize: fontSizes.sm,
   },
 
-  transcriptText: { fontSize: 13, color: '#555', lineHeight: 20, fontFamily: 'monospace' },
-  expandBtn: { marginTop: 8 },
-  expandBtnText: { color: RED, fontSize: 13, fontWeight: '600' },
+  // Title
+  titleContainer: {
+    gap: 2,
+  },
+  title: {
+    fontFamily: fonts.title,
+    fontSize: fontSizes.xxl,
+    color: colors.cream,
+    letterSpacing: 0.5,
+  },
+  editHint: {
+    fontFamily: fonts.body,
+    fontSize: fontSizes.xs,
+    color: colors.fog,
+  },
+  editRow: {
+    marginBottom: spacing.xxs,
+  },
+  titleInput: {
+    fontFamily: fonts.title,
+    fontSize: fontSizes.xxl,
+    color: colors.cream,
+    borderBottomWidth: 2,
+    borderBottomColor: colors.amber,
+    paddingBottom: 4,
+  },
 
-  divider: { height: 1, backgroundColor: BORDER, marginVertical: 16 },
+  // Status Banner
+  banner: {
+    borderRadius: radius.md,
+    padding: spacing.sm,
+    borderWidth: 1,
+  },
+  bannerPending: {
+    backgroundColor: colors.amberSubtle,
+    borderColor: colors.amberGlow,
+  },
+  bannerFailed: {
+    backgroundColor: colors.errorSubtle,
+    borderColor: colors.error,
+  },
+  bannerText: {
+    fontFamily: fonts.bold,
+    fontSize: fontSizes.sm,
+  },
+  bannerTextPending: {
+    color: colors.amber,
+  },
+  bannerTextFailed: {
+    color: colors.error,
+  },
+  bannerDetail: {
+    fontFamily: fonts.body,
+    fontSize: fontSizes.xs,
+    color: colors.mist,
+    marginTop: 4,
+  },
 
-  chatBtn: {
-    backgroundColor: '#f0f4ff',
-    borderRadius: 10,
-    padding: 14,
+  // Metadata
+  metaRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: spacing.xs,
+  },
+  metaChip: {
+    backgroundColor: colors.obsidian,
+    paddingHorizontal: spacing.sm,
+    paddingVertical: 4,
+    borderRadius: radius.full,
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  metaChipText: {
+    fontFamily: fonts.body,
+    fontSize: fontSizes.xs,
+    color: colors.mist,
+  },
+
+  // Tags
+  tagRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: spacing.xs,
+  },
+  tag: {
+    backgroundColor: colors.amberSubtle,
+    paddingHorizontal: spacing.sm,
+    paddingVertical: 3,
+    borderRadius: radius.full,
+    borderWidth: 1,
+    borderColor: colors.amberGlow,
+  },
+  tagText: {
+    fontFamily: fonts.bodyMed,
+    fontSize: fontSizes.xs,
+    color: colors.amber,
+  },
+
+  // Hero Audio Player
+  heroPlayerCard: {
+    backgroundColor: colors.obsidian,
+    borderRadius: radius.lg,
+    borderWidth: 1,
+    borderColor: colors.border,
+    padding: spacing.md,
+    gap: spacing.md,
+    ...shadow.sm,
+  },
+  waveformContainer: {
+    flexDirection: 'row',
     alignItems: 'center',
-    marginBottom: 12,
+    justifyContent: 'space-between',
+    height: 36,
+    paddingHorizontal: spacing.xs,
   },
-  chatBtnText: { color: '#3b5bdb', fontWeight: '600', fontSize: 15 },
+  waveformBar: {
+    width: 3,
+    borderRadius: 2,
+  },
+  playerControls: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.md,
+  },
+  heroPlayBtn: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    backgroundColor: colors.amber,
+    alignItems: 'center',
+    justifyContent: 'center',
+    ...shadow.md,
+  },
+  heroPlayBtnActive: {
+    backgroundColor: colors.amberDim,
+    ...shadow.glow,
+  },
+  heroPlayIcon: {
+    fontSize: fontSizes.base,
+    color: colors.midnight,
+    fontFamily: fonts.bold,
+  },
+  playerInfo: {
+    flex: 1,
+    gap: 2,
+  },
+  playerTimeText: {
+    fontFamily: fonts.bold,
+    fontSize: fontSizes.base,
+    color: colors.cream,
+  },
+  playerStatusText: {
+    fontFamily: fonts.body,
+    fontSize: fontSizes.xs,
+    color: colors.mist,
+  },
+  playerError: {
+    fontFamily: fonts.body,
+    fontSize: fontSizes.xs,
+    color: colors.error,
+  },
+  webAudioWrapper: {
+    width: '100%',
+  },
 
-  deleteBtn: { padding: 14, alignItems: 'center' },
-  deleteBtnText: { color: RED, fontSize: 14 },
+  // Section
+  section: {
+    gap: spacing.xs,
+  },
+  sectionHeader: {
+    fontFamily: fonts.bold,
+    fontSize: fontSizes.xs,
+    color: colors.mist,
+    letterSpacing: 1,
+    textTransform: 'uppercase',
+  },
+
+  // Summary Card
+  summaryCard: {
+    backgroundColor: colors.obsidian,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    borderColor: colors.border,
+    padding: spacing.md,
+    gap: spacing.xs,
+  },
+  summaryHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.xs,
+  },
+  summaryDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+    backgroundColor: colors.amber,
+  },
+  summaryText: {
+    fontFamily: fonts.body,
+    fontSize: fontSizes.base,
+    color: colors.cream,
+    lineHeight: 22,
+  },
+
+  // Key Takeaways Chips (Horizontal)
+  takeawaysScroll: {
+    gap: spacing.xs,
+    paddingVertical: spacing.xxs,
+  },
+  takeawayChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.xs,
+    backgroundColor: colors.charcoal,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    borderColor: colors.border,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm,
+    maxWidth: 280,
+  },
+  takeawayDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+    backgroundColor: colors.amber,
+  },
+  takeawayText: {
+    fontFamily: fonts.body,
+    fontSize: fontSizes.sm,
+    color: colors.cream,
+    lineHeight: 18,
+    flexShrink: 1,
+  },
+
+  // Action Items
+  actionItemsList: {
+    gap: spacing.xs,
+  },
+  actionItemRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    backgroundColor: colors.obsidian,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    borderColor: colors.border,
+    padding: spacing.sm,
+    gap: spacing.sm,
+  },
+  checkbox: {
+    width: 20,
+    height: 20,
+    borderRadius: radius.sm,
+    borderWidth: 1.5,
+    borderColor: colors.fog,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginTop: 1,
+  },
+  checkboxChecked: {
+    backgroundColor: colors.amber,
+    borderColor: colors.amber,
+  },
+  checkmark: {
+    fontSize: fontSizes.xs,
+    color: colors.midnight,
+    fontFamily: fonts.bold,
+  },
+  actionText: {
+    fontFamily: fonts.body,
+    fontSize: fontSizes.base,
+    color: colors.cream,
+    flex: 1,
+    lineHeight: 22,
+  },
+  actionTextChecked: {
+    color: colors.mist,
+    textDecorationLine: 'line-through',
+  },
+
+  // Notes
+  notesCard: {
+    backgroundColor: colors.charcoal,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    borderColor: colors.border,
+    padding: spacing.md,
+    minHeight: 70,
+  },
+  notesText: {
+    fontFamily: fonts.body,
+    fontSize: fontSizes.base,
+    color: colors.cream,
+    lineHeight: 22,
+  },
+  notesPlaceholder: {
+    color: colors.fog,
+  },
+  notesInput: {
+    fontFamily: fonts.body,
+    fontSize: fontSizes.base,
+    color: colors.cream,
+    lineHeight: 22,
+    backgroundColor: colors.charcoal,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    borderColor: colors.amber,
+    padding: spacing.md,
+    minHeight: 90,
+  },
+
+  // Transcript
+  transcriptHeaderRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+  },
+  transcriptCount: {
+    fontFamily: fonts.body,
+    fontSize: fontSizes.xs,
+    color: colors.fog,
+  },
+  transcriptContainer: {
+    backgroundColor: colors.obsidian,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    borderColor: colors.border,
+    padding: spacing.sm,
+    gap: spacing.xs,
+  },
+  transcriptLine: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: spacing.xs,
+    paddingVertical: 2,
+  },
+  timestampBadge: {
+    backgroundColor: colors.charcoal,
+    borderRadius: radius.sm,
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    marginTop: 2,
+  },
+  timestampText: {
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+    fontSize: fontSizes.xs,
+    color: colors.amber,
+  },
+  transcriptLineIndex: {
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+    fontSize: fontSizes.xs,
+    color: colors.fog,
+    width: 24,
+    marginTop: 2,
+  },
+  transcriptBody: {
+    fontFamily: fonts.body,
+    fontSize: fontSizes.sm,
+    color: colors.cream,
+    lineHeight: 20,
+    flex: 1,
+  },
+  expandBtn: {
+    alignSelf: 'flex-start',
+    paddingVertical: spacing.xs,
+  },
+  expandBtnText: {
+    fontFamily: fonts.bodyMed,
+    fontSize: fontSizes.sm,
+    color: colors.amber,
+  },
+
+  // Chat Action
+  chatActionBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    backgroundColor: colors.charcoal,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    borderColor: colors.border,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.md,
+  },
+  chatActionBtnText: {
+    fontFamily: fonts.bodyMed,
+    fontSize: fontSizes.base,
+    color: colors.cream,
+  },
+  chatActionBtnArrow: {
+    fontFamily: fonts.bold,
+    fontSize: fontSizes.lg,
+    color: colors.amber,
+  },
+
+  // Delete
+  deleteBtn: {
+    alignItems: 'center',
+    paddingVertical: spacing.md,
+  },
+  deleteBtnText: {
+    fontFamily: fonts.body,
+    fontSize: fontSizes.sm,
+    color: colors.error,
+  },
 });
