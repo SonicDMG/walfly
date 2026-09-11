@@ -197,6 +197,13 @@ export default function RecordingDetailScreen() {
     }
   }, [titleDraft, recording?.title]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // Hooks must be unconditional — memoize before any early returns
+  const lines = useMemo(
+    () => (recording?.transcript ?? '').split('\n').filter((l) => l.trim().length > 0),
+    [recording?.transcript],
+  );
+  const previewLines = useMemo(() => lines.slice(0, 6), [lines]);
+
   if (!safeId || loading) {
     return (
       <View style={styles.centered}>
@@ -236,12 +243,6 @@ export default function RecordingDetailScreen() {
     );
   }
 
-  // Memoize transcript processing — only recompute when transcript content changes
-  const lines = useMemo(
-    () => (recording.transcript ?? '').split('\n').filter((l) => l.trim().length > 0),
-    [recording.transcript],
-  );
-  const previewLines = useMemo(() => lines.slice(0, 6), [lines]);
   const displayedLines = transcriptExpanded ? lines : previewLines;
 
   return (
