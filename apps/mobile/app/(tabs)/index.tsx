@@ -13,7 +13,7 @@ import {
   StyleSheet,
   Animated,
 } from 'react-native';
-import * as Progress from 'react-native-progress';
+import ProgressIndicator from '../../components/ProgressIndicator';
 import { useRecordingUpload, RecordState } from '../../hooks/useRecordingUpload';
 import { colors, fonts, fontSizes, spacing, radius, shadow } from '../../lib/theme';
 
@@ -110,25 +110,11 @@ export default function RecordScreen() {
 
       {/* Progress */}
       {(state === 'uploading' || state === 'processing') && (
-        <View style={styles.progressContainer}>
-          <Progress.Bar
-            progress={progress}
-            width={200}
-            height={2}
-            color={colors.amber}
-            unfilledColor={colors.border}
-            borderWidth={0}
-            borderRadius={1}
-          />
-        </View>
+        <ProgressIndicator variant="bar" progress={progress} />
       )}
 
       {state === 'requesting' && (
-        <Progress.CircleSnail
-          color={[colors.amber, colors.mist]}
-          size={24}
-          thickness={2}
-        />
+        <ProgressIndicator variant="spinner" />
       )}
 
       {isError && error && (
@@ -223,10 +209,6 @@ const styles = StyleSheet.create({
     height: 22,
     borderRadius: radius.sm,   // square when recording = "stop"
     backgroundColor: colors.amber,
-  },
-  progressContainer: {
-    alignItems: 'center',
-    marginTop: -spacing.xs,
   },
   errorBox: {
     alignItems: 'center',
