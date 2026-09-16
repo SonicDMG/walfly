@@ -15,9 +15,11 @@ import {
   StyleSheet,
   RefreshControl,
   ActivityIndicator,
+  Platform,
 } from 'react-native';
 import { useFocusEffect, useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { WEB_TAB_BAR_HEIGHT } from './_layout';
 import {
   apiUrl,
   describeRequestError,
@@ -156,7 +158,7 @@ export default function RecordingsScreen() {
   return (
     <View style={styles.container}>
       {/* Header */}
-      <View style={[styles.header, { paddingTop: insets.top + spacing.sm }]}>
+      <View style={[styles.header, { paddingTop: (Platform.OS === 'web' ? WEB_TAB_BAR_HEIGHT : insets.top) + spacing.sm }]}>
         <Text style={styles.headerTitle}>moments</Text>
       </View>
 

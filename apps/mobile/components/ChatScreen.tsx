@@ -18,6 +18,7 @@ import {
 } from 'react-native';
 import Markdown from 'react-native-markdown-display';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { WEB_TAB_BAR_HEIGHT } from '../app/(tabs)/_layout';
 import { useChat, ChatMessage } from '../hooks/useChat';
 import { colors, fonts, fontSizes, spacing, radius } from '../lib/theme';
 
@@ -54,7 +55,7 @@ export default function ChatScreen({ recordingId, title }: Props) {
       keyboardVerticalOffset={90}
     >
       {/* Header */}
-      <View style={[styles.header, { paddingTop: insets.top + spacing.sm }]}>
+      <View style={[styles.header, { paddingTop: (Platform.OS === 'web' ? WEB_TAB_BAR_HEIGHT : insets.top) + spacing.sm }]}>
         <View style={styles.headerLeft}>
           <Text style={styles.headerTitle} numberOfLines={1} ellipsizeMode="tail">
             {title ?? 'chat'}

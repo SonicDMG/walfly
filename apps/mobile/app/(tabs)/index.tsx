@@ -12,8 +12,10 @@ import {
   Pressable,
   StyleSheet,
   Animated,
+  Platform,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { WEB_TAB_BAR_HEIGHT } from './_layout';
 import ProgressIndicator from '../../components/ProgressIndicator';
 import { useRecordingUpload, RecordState } from '../../hooks/useRecordingUpload';
 import { colors, fonts, fontSizes, spacing, radius, shadow } from '../../lib/theme';
@@ -70,7 +72,7 @@ export default function RecordScreen() {
   const glowScale   = glowAnim.interpolate({ inputRange: [0, 1], outputRange: [1.1, 1.55] });
 
   return (
-    <View style={[styles.container, { paddingTop: insets.top, paddingBottom: insets.bottom }]}>
+    <View style={[styles.container, { paddingTop: Platform.OS === 'web' ? WEB_TAB_BAR_HEIGHT : insets.top, paddingBottom: insets.bottom }]}>
       {/* Wordmark */}
       <Text style={styles.wordmark}>walfly</Text>
       <Text style={styles.tagline}>{labelFor(state)}</Text>

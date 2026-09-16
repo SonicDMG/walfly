@@ -3,6 +3,9 @@ import { ThemeProvider, DarkTheme } from 'expo-router';
 import { NativeTabs } from 'expo-router/unstable-native-tabs';
 import { colors } from '../../lib/theme';
 
+/** Height to clear the fixed web tab bar (top: 24px + height: 40px). */
+export const WEB_TAB_BAR_HEIGHT = 64;
+
 // DynamicColorIOS is iOS-only — calling it at module level crashes the web
 // static renderer. We lazily resolve it inside the component so it only runs
 // on a live iOS runtime, never during SSR/static export.
