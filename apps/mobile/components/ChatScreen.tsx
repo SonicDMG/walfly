@@ -17,6 +17,7 @@ import {
   Platform,
 } from 'react-native';
 import Markdown from 'react-native-markdown-display';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useChat, ChatMessage } from '../hooks/useChat';
 import { colors, fonts, fontSizes, spacing, radius } from '../lib/theme';
 
@@ -29,6 +30,7 @@ export default function ChatScreen({ recordingId, title }: Props) {
   const { messages, send, isStreaming, error, reset } = useChat({ recordingId });
   const [input, setInput] = useState('');
   const listRef = useRef<FlatList<ChatMessage>>(null);
+  const insets = useSafeAreaInsets();
 
   useEffect(() => {
     if (messages.length > 0) {
@@ -52,7 +54,7 @@ export default function ChatScreen({ recordingId, title }: Props) {
       keyboardVerticalOffset={90}
     >
       {/* Header */}
-      <View style={styles.header}>
+      <View style={[styles.header, { paddingTop: insets.top + spacing.sm }]}>
         <View style={styles.headerLeft}>
           <Text style={styles.headerTitle}>
             {title ?? 'chat'}
@@ -106,7 +108,7 @@ export default function ChatScreen({ recordingId, title }: Props) {
       {error && <Text style={styles.errorText}>{error}</Text>}
 
       {/* Input bar */}
-      <View style={styles.inputBar}>
+      <View style={[styles.inputBar, { paddingBottom: insets.bottom + spacing.sm }]}>
         <TextInput
           style={styles.input}
           value={input}
@@ -203,7 +205,6 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'space-between',
     paddingHorizontal: spacing.md,
-    paddingTop: spacing.lg,
     paddingBottom: spacing.sm,
     borderBottomWidth: 1,
     borderBottomColor: colors.border,
@@ -321,7 +322,8 @@ const styles = StyleSheet.create({
   inputBar: {
     flexDirection: 'row',
     alignItems: 'flex-end',
-    padding: spacing.sm,
+    paddingTop: spacing.sm,
+    paddingHorizontal: spacing.sm,
     borderTopWidth: 1,
     borderTopColor: colors.border,
     gap: spacing.xs,

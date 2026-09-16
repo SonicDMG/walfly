@@ -13,6 +13,7 @@ import {
   StyleSheet,
   Animated,
 } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import ProgressIndicator from '../../components/ProgressIndicator';
 import { useRecordingUpload, RecordState } from '../../hooks/useRecordingUpload';
 import { colors, fonts, fontSizes, spacing, radius, shadow } from '../../lib/theme';
@@ -22,6 +23,7 @@ const BUSY_STATES = new Set<RecordState>(['uploading', 'processing', 'requesting
 export default function RecordScreen() {
   const { state, error, progress, startRecording, stopAndUpload, reset } =
     useRecordingUpload();
+  const insets = useSafeAreaInsets();
 
   const pulseAnim = useRef(new Animated.Value(1)).current;
   const glowAnim  = useRef(new Animated.Value(0)).current;
@@ -68,7 +70,7 @@ export default function RecordScreen() {
   const glowScale   = glowAnim.interpolate({ inputRange: [0, 1], outputRange: [1.1, 1.55] });
 
   return (
-    <View style={styles.container}>
+    <View style={[styles.container, { paddingTop: insets.top, paddingBottom: insets.bottom }]}>
       {/* Wordmark */}
       <Text style={styles.wordmark}>walfly</Text>
       <Text style={styles.tagline}>{labelFor(state)}</Text>

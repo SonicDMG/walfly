@@ -17,6 +17,7 @@ import {
   ActivityIndicator,
 } from 'react-native';
 import { useFocusEffect, useRouter } from 'expo-router';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import {
   apiUrl,
   describeRequestError,
@@ -34,6 +35,7 @@ const IDLE_RECHECK_MS      = 5000;
 
 export default function RecordingsScreen() {
   const router = useRouter();
+  const insets = useSafeAreaInsets();
   const [recordings, setRecordings] = useState<RecordingSummary[]>([]);
   const [query,      setQuery]      = useState('');
   const [loading,    setLoading]    = useState(true);
@@ -154,7 +156,7 @@ export default function RecordingsScreen() {
   return (
     <View style={styles.container}>
       {/* Header */}
-      <View style={styles.header}>
+      <View style={[styles.header, { paddingTop: insets.top + spacing.sm }]}>
         <Text style={styles.headerTitle}>moments</Text>
       </View>
 
@@ -286,7 +288,6 @@ const styles = StyleSheet.create({
 
   header: {
     paddingHorizontal: spacing.md,
-    paddingTop: spacing.lg,
     paddingBottom: spacing.sm,
   },
   headerTitle: {

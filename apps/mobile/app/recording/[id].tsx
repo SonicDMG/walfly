@@ -25,6 +25,7 @@ import {
 } from 'react-native';
 import { AudioModule, createAudioPlayer, setAudioModeAsync, type AudioStatus } from 'expo-audio';
 import { useLocalSearchParams, useRouter } from 'expo-router';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import {
   apiUrl,
   describeRequestError,
@@ -50,6 +51,7 @@ type LoadError = { kind: 'notFound' } | { kind: 'other'; message: string };
 export default function RecordingDetailScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
   const router = useRouter();
+  const insets = useSafeAreaInsets();
 
   // Validate id at mount — reject anything that isn't a UUID/hex id (CWE-22)
   const safeId = id && /^[0-9a-f-]{1,64}$/i.test(id) ? id : null;
@@ -248,7 +250,7 @@ export default function RecordingDetailScreen() {
   return (
     <View style={styles.screen}>
       {/* Navigation Top Bar */}
-      <View style={styles.navBar}>
+      <View style={[styles.navBar, { paddingTop: insets.top + spacing.xs }]}>
         <Pressable
           style={({ pressed }) => [styles.backBtn, pressed && styles.pressed]}
           onPress={() => router.back()}
@@ -267,7 +269,7 @@ export default function RecordingDetailScreen() {
         </Pressable>
       </View>
 
-      <ScrollView style={styles.scroll} contentContainerStyle={styles.content}>
+      <ScrollView style={styles.scroll} contentContainerStyle={[styles.content, { paddingBottom: insets.bottom + spacing.xl }]}>
         {/* Title — Editable inline */}
         {editingTitle ? (
           <View style={styles.editRow}>
@@ -732,7 +734,6 @@ const styles = StyleSheet.create({
   content: {
     paddingHorizontal: spacing.md,
     paddingTop: spacing.xs,
-    paddingBottom: spacing.xl,
     gap: spacing.lg,
   },
   centered: {
@@ -758,7 +759,6 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'space-between',
     paddingHorizontal: spacing.md,
-    paddingTop: spacing.lg,
     paddingBottom: spacing.xs,
   },
   backBtn: {
