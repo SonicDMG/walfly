@@ -23,6 +23,12 @@ config.resolver.disableHierarchicalLookup = true;
 config.resolver.extraNodeModules = {
   ...config.resolver.extraNodeModules,
   punycode: require.resolve('punycode'),
+  // react-native-reanimated bundles its own semver but Metro can't find it
+  // when disableHierarchicalLookup is true (needed for the React version pin).
+  semver: path.resolve(
+    workspaceRoot,
+    'node_modules/react-native-reanimated/node_modules/semver',
+  ),
 };
 
 module.exports = config;

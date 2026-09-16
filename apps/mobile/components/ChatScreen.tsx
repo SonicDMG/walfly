@@ -14,6 +14,7 @@ import {
   Pressable,
   StyleSheet,
   KeyboardAvoidingView,
+  Keyboard,
   Platform,
 } from 'react-native';
 import Markdown from 'react-native-markdown-display';
@@ -30,8 +31,21 @@ interface Props {
 export default function ChatScreen({ recordingId, title }: Props) {
   const { messages, send, isStreaming, error, reset } = useChat({ recordingId });
   const [input, setInput] = useState('');
+  const [keyboardOpen, setKeyboardOpen] = useState(false);
   const listRef = useRef<FlatList<ChatMessage>>(null);
   const insets = useSafeAreaInsets();
+
+  useEffect(() => {
+    const show = Keyboard.addListener(
+      Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow',
+      () => setKeyboardOpen(true),
+    );
+    const hide = Keyboard.addListener(
+      Platform.OS === 'ios' ? 'keyboardWillHide' : 'keyboardDidHide',
+      () => setKeyboardOpen(false),
+    );
+    return () => { show.remove(); hide.remove(); };
+  }, []);
 
   useEffect(() => {
     if (messages.length > 0) {
@@ -52,7 +66,6 @@ export default function ChatScreen({ recordingId, title }: Props) {
     <KeyboardAvoidingView
       style={styles.container}
       behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-      keyboardVerticalOffset={90}
     >
       {/* Header */}
       <View style={[styles.header, { paddingTop: (Platform.OS === 'web' ? WEB_TAB_BAR_HEIGHT : insets.top) + spacing.sm }]}>
@@ -95,6 +108,7 @@ export default function ChatScreen({ recordingId, title }: Props) {
             />
           )}
           contentContainerStyle={styles.messageList}
+          contentInsetAdjustmentBehavior="automatic"
         />
       )}
 
@@ -109,7 +123,7 @@ export default function ChatScreen({ recordingId, title }: Props) {
       {error && <Text style={styles.errorText}>{error}</Text>}
 
       {/* Input bar */}
-      <View style={[styles.inputBar, { paddingBottom: insets.bottom + spacing.sm }]}>
+      <View style={[styles.inputBar, { paddingBottom: (keyboardOpen ? 0 : insets.bottom) + spacing.sm }]}>
         <TextInput
           style={styles.input}
           value={input}
@@ -206,7 +220,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'space-between',
     paddingHorizontal: spacing.md,
-    paddingBottom: spacing.sm,
+    paddingBottom: spacing.xs,
     borderBottomWidth: 1,
     borderBottomColor: colors.border,
   },
@@ -219,7 +233,7 @@ const styles = StyleSheet.create({
   },
   headerTitle: {
     fontFamily: fonts.display,
-    fontSize: fontSizes.xxl,
+    fontSize: fontSizes.lg,
     color: colors.cream,
     letterSpacing: 1,
     flexShrink: 1,
@@ -325,7 +339,7 @@ const styles = StyleSheet.create({
   inputBar: {
     flexDirection: 'row',
     alignItems: 'flex-end',
-    paddingTop: spacing.sm,
+    paddingTop: spacing.xs,
     paddingHorizontal: spacing.sm,
     borderTopWidth: 1,
     borderTopColor: colors.border,
@@ -338,11 +352,11 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: colors.border,
     paddingHorizontal: spacing.md,
-    paddingVertical: spacing.xs + 2,
+    paddingVertical: spacing.xs,
     fontSize: fontSizes.base,
     fontFamily: fonts.body,
     color: colors.cream,
-    maxHeight: 100,
+    maxHeight: 80,
   },
   sendBtn: {
     width: 38,
