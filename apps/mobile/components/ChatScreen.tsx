@@ -56,7 +56,7 @@ export default function ChatScreen({ recordingId, title }: Props) {
       {/* Header */}
       <View style={[styles.header, { paddingTop: insets.top + spacing.sm }]}>
         <View style={styles.headerLeft}>
-          <Text style={styles.headerTitle}>
+          <Text style={styles.headerTitle} numberOfLines={1} ellipsizeMode="tail">
             {title ?? 'chat'}
           </Text>
           <View style={styles.scopeChip}>
@@ -214,12 +214,14 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     gap: spacing.xs,
     flex: 1,
+    overflow: 'hidden',
   },
   headerTitle: {
     fontFamily: fonts.display,
     fontSize: fontSizes.xxl,
     color: colors.cream,
     letterSpacing: 1,
+    flexShrink: 1,
   },
   scopeChip: {
     backgroundColor: colors.amberSubtle,
