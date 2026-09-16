@@ -5,5 +5,5 @@
 import ChatScreen from '../../components/ChatScreen';
 
 export default function GlobalChatTab() {
-  return <ChatScreen title="Chat with your recordings" />;
+  return <ChatScreen title="chat" />;
 }
