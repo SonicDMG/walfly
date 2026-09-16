@@ -210,7 +210,11 @@ export default function RecordingsScreen() {
             )}
           </View>
         }
-        contentContainerStyle={recordings.length === 0 ? styles.emptyContainer : styles.listContent}
+        contentContainerStyle={[
+          recordings.length === 0 ? styles.emptyContainer : styles.listContent,
+          Platform.OS !== 'web' && { paddingBottom: insets.bottom },
+        ]}
+        contentInsetAdjustmentBehavior="automatic"
       />
     </View>
   );
