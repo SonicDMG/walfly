@@ -25,7 +25,8 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { WEB_TAB_BAR_HEIGHT } from './_layout';
 import ProgressIndicator from '../../components/ProgressIndicator';
 import { useRecordingUpload, RecordState } from '../../hooks/useRecordingUpload';
-import { colors, fonts, fontSizes, spacing, radius, shadow } from '../../lib/theme';
+import { Ionicons } from '@expo/vector-icons';
+import { colors, fonts, fontSizes, spacing, shadow } from '../../lib/theme';
 
 const BUSY_STATES = new Set<RecordState>(['uploading', 'processing', 'requesting']);
 
@@ -144,11 +145,13 @@ export default function RecordScreen() {
               { opacity: pulseAnim },
             ]}
           >
-            {/* Inner dot / stop square */}
-            <View style={[
-              styles.buttonInner,
-              isRecording && styles.buttonInnerRecording,
-            ]} />
+            {/* Icon: mic (idle/busy), stop (recording), checkmark (done) */}
+            {isRecording
+              ? <Ionicons name="stop"      size={32} color={colors.amber} />
+              : isDone
+              ? <Ionicons name="checkmark" size={32} color={colors.success} />
+              : <Ionicons name="mic"       size={32} color={colors.amber} />
+            }
           </Animated.View>
         </Pressable>
       </View>
@@ -242,18 +245,6 @@ const styles = StyleSheet.create({
   },
   buttonError: {
     borderColor: colors.error,
-  },
-  buttonInner: {
-    width: 28,
-    height: 28,
-    borderRadius: 14,
-    backgroundColor: colors.amber,
-  },
-  buttonInnerRecording: {
-    width: 22,
-    height: 22,
-    borderRadius: radius.sm,   // square when recording = "stop"
-    backgroundColor: colors.amber,
   },
   errorBox: {
     alignItems: 'center',
