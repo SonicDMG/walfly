@@ -12,6 +12,7 @@
  */
 
 import React, { useState, useEffect, useCallback, useRef, useMemo, memo } from 'react';
+import { TagEditor } from '../../components/TagEditor';
 import {
   View,
   Text,
@@ -307,15 +308,13 @@ export default function RecordingDetailScreen() {
         </View>
 
         {/* Tags */}
-        {recording.tags && recording.tags.length > 0 && (
-          <View style={styles.tagRow}>
-            {recording.tags.map((tag) => (
-              <View key={tag} style={styles.tag}>
-                <Text style={styles.tagText}>{tag.toLowerCase()}</Text>
-              </View>
-            ))}
-          </View>
-        )}
+        <TagEditor
+          tags={recording.tags ?? []}
+          onChange={(newTags) => {
+            setRecording((prev) => prev ? { ...prev, tags: newTags } : prev);
+            patch({ tags: newTags });
+          }}
+        />
 
         {/* Hero Audio Player with Waveform */}
         <AudioPlayer
@@ -874,26 +873,6 @@ const styles = StyleSheet.create({
     fontFamily: fonts.body,
     fontSize: fontSizes.xs,
     color: colors.mist,
-  },
-
-  // Tags
-  tagRow: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: spacing.xs,
-  },
-  tag: {
-    backgroundColor: colors.amberSubtle,
-    paddingHorizontal: spacing.sm,
-    paddingVertical: 3,
-    borderRadius: radius.full,
-    borderWidth: 1,
-    borderColor: colors.amberGlow,
-  },
-  tagText: {
-    fontFamily: fonts.bodyMed,
-    fontSize: fontSizes.xs,
-    color: colors.amber,
   },
 
   // Hero Audio Player
