@@ -14,6 +14,13 @@ import {
   Animated,
   Platform,
 } from 'react-native';
+import Reanimated, {
+  useSharedValue,
+  useAnimatedStyle,
+  withSequence,
+  withTiming,
+  Easing,
+} from 'react-native-reanimated';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { WEB_TAB_BAR_HEIGHT } from './_layout';
 import ProgressIndicator from '../../components/ProgressIndicator';
@@ -29,6 +36,38 @@ export default function RecordScreen() {
 
   const pulseAnim = useRef(new Animated.Value(1)).current;
   const glowAnim  = useRef(new Animated.Value(0)).current;
+
+  // Reanimated shared values for the done-state tagline pulse
+  const nudgeScale   = useSharedValue(1);
+  const nudgeOpacity = useSharedValue(1);
+
+  const nudgeStyle = useAnimatedStyle(() => ({
+    transform: [{ scale: nudgeScale.value }],
+    opacity: nudgeOpacity.value,
+  }));
+
+  // Fire tagline pulse when state enters 'done'
+  useEffect(() => {
+    if (state === 'done') {
+      const ease = Easing.inOut(Easing.ease);
+      nudgeScale.value = withSequence(
+        withTiming(1.08, { duration: 200, easing: ease }),
+        withTiming(1,    { duration: 200, easing: ease }),
+        withTiming(1.08, { duration: 200, easing: ease }),
+        withTiming(1,    { duration: 200, easing: ease }),
+      );
+      nudgeOpacity.value = withSequence(
+        withTiming(1,    { duration: 200, easing: ease }),
+        withTiming(0.5,  { duration: 200, easing: ease }),
+        withTiming(1,    { duration: 200, easing: ease }),
+        withTiming(0.5,  { duration: 200, easing: ease }),
+        withTiming(1,    { duration: 100, easing: ease }),
+      );
+    } else {
+      nudgeScale.value   = 1;
+      nudgeOpacity.value = 1;
+    }
+  }, [state, nudgeScale, nudgeOpacity]);
 
   // Pulse + glow while recording
   useEffect(() => {
@@ -75,7 +114,9 @@ export default function RecordScreen() {
     <View style={[styles.container, { paddingTop: Platform.OS === 'web' ? WEB_TAB_BAR_HEIGHT : insets.top }]}>
       {/* Wordmark */}
       <Text style={styles.wordmark}>walfly</Text>
-      <Text style={styles.tagline}>{labelFor(state)}</Text>
+      <Reanimated.Text style={[styles.tagline, nudgeStyle]}>
+        {labelFor(state)}
+      </Reanimated.Text>
 
       {/* Glow ring — only during recording */}
       <View style={styles.buttonArea}>
@@ -138,7 +179,7 @@ function labelFor(state: RecordState): string {
     case 'recording':  return 'recording — tap to stop';
     case 'uploading':  return 'uploading…';
     case 'processing': return 'processing…';
-    case 'done':       return 'saved';
+    case 'done':       return 'Saved — check Moments';
     case 'error':      return 'something went wrong';
   }
 }
