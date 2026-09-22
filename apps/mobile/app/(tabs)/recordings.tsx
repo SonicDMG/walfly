@@ -16,6 +16,7 @@ import {
   RefreshControl,
   ActivityIndicator,
   Platform,
+  Animated,
 } from 'react-native';
 import { useFocusEffect, useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -126,6 +127,9 @@ export default function RecordingsScreen() {
     useCallback(() => {
       let cancelled = false;
       let timer: ReturnType<typeof setTimeout> | null = null;
+      // Fetch immediately on focus so newly created recordings appear
+      // without requiring a manual pull-to-refresh.
+      void fetchRef.current(queryRef.current);
       const run = async () => {
         if (cancelled) return;
         const { delay, refresh } = await tickPending(recordingsRef.current);
@@ -222,14 +226,34 @@ export default function RecordingsScreen() {
 
 function RecordingCard({ recording, onPress }: { recording: RecordingSummary; onPress: () => void }) {
   const accentColor = STATUS_COLORS[recording.status] ?? colors.mist;
+  const pulseAnim = useRef(new Animated.Value(1)).current;
+
+  useEffect(() => {
+    if (!isNonTerminal(recording.status)) {
+      pulseAnim.setValue(1);
+      return;
+    }
+    const nativeDriver = Platform.OS !== 'web';
+    const animation = Animated.loop(
+      Animated.sequence([
+        Animated.timing(pulseAnim, { toValue: 0.4, duration: 800, useNativeDriver: nativeDriver }),
+        Animated.timing(pulseAnim, { toValue: 1,   duration: 800, useNativeDriver: nativeDriver }),
+      ])
+    );
+    animation.start();
+    return () => animation.stop();
+  }, [recording.status, pulseAnim]);
+
   return (
     <Pressable
       style={({ pressed }) => [styles.card, pressed && styles.cardPressed]}
       onPress={onPress}
       accessibilityRole="button"
     >
-      {/* Amber left accent bar */}
-      <View style={[styles.cardAccent, { backgroundColor: accentColor }]} />
+      {/* Left accent bar — pulses while pipeline is in progress */}
+      <Animated.View
+        style={[styles.cardAccent, { backgroundColor: accentColor, opacity: pulseAnim }]}
+      />
 
       <View style={styles.cardBody}>
         <View style={styles.cardHeader}>
@@ -260,17 +284,74 @@ const STATUS_LABELS: Record<RecordingStatus, string> = {
 };
 
 const STATUS_COLORS: Record<RecordingStatus, string> = {
-  uploaded:    colors.amber,
-  transcribing:colors.amber,
-  enriching:   colors.amber,
+  uploaded:    colors.pipelineQueued,
+  transcribing:colors.pipelineTranscribing,
+  enriching:   colors.pipelineEnriching,
   ready:       colors.success,
   failed:      colors.error,
 };
 
+const STEP_DOTS: Partial<Record<RecordingStatus, number>> = {
+  uploaded:     1,
+  transcribing: 2,
+  enriching:    3,
+};
+
+const STEP_CYCLE_MS = 400; // time each dot stays bright
+
+function SteppingDots({ count, color }: { count: number; color: string }) {
+  const anims = useRef([
+    new Animated.Value(0),
+    new Animated.Value(0),
+    new Animated.Value(0),
+  ]).current;
+  const nativeDriver = Platform.OS !== 'web';
+
+  useEffect(() => {
+    // Stagger: each dot brightens then dims, offset by STEP_CYCLE_MS
+    const animations = anims.map((anim, i) =>
+      Animated.loop(
+        Animated.sequence([
+          Animated.delay(i * STEP_CYCLE_MS),
+          Animated.timing(anim, { toValue: 1,   duration: STEP_CYCLE_MS * 0.4, useNativeDriver: nativeDriver }),
+          Animated.timing(anim, { toValue: 0.2, duration: STEP_CYCLE_MS * 0.6, useNativeDriver: nativeDriver }),
+          // pad the remaining 2 slots so the loop period stays constant at 3 × STEP_CYCLE_MS
+          Animated.delay((3 - 1 - i) * STEP_CYCLE_MS),
+        ])
+      )
+    );
+    // Reset all before starting
+    anims.forEach((a) => a.setValue(0));
+    animations.forEach((a) => a.start());
+    return () => animations.forEach((a) => a.stop());
+  }, [nativeDriver]);
+
+  return (
+    <View style={styles.stepDots}>
+      {[0, 1, 2].map((i) => (
+        <Animated.View
+          key={i}
+          style={[
+            styles.stepDot,
+            {
+              backgroundColor: i < count ? color : colors.fog,
+              opacity: i < count ? anims[i] : 0.25,
+            },
+          ]}
+        />
+      ))}
+    </View>
+  );
+}
+
 function StatusBadge({ status }: { status: RecordingStatus }) {
   const color = STATUS_COLORS[status] ?? colors.mist;
+  const dots  = STEP_DOTS[status];
   return (
     <View style={[styles.badge, { backgroundColor: color + '18' }]}>
+      {dots !== undefined && (
+        <SteppingDots count={dots} color={color} />
+      )}
       <Text style={[styles.badgeText, { color }]}>{STATUS_LABELS[status] ?? status}</Text>
     </View>
   );
@@ -380,6 +461,9 @@ const styles = StyleSheet.create({
     color: colors.error,
   },
   badge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
     paddingHorizontal: spacing.xs,
     paddingVertical: 2,
     borderRadius: radius.sm,
@@ -387,5 +471,15 @@ const styles = StyleSheet.create({
   badgeText: {
     fontFamily: fonts.bold,
     fontSize: fontSizes.xs,
+  },
+  stepDots: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 3,
+  },
+  stepDot: {
+    width: 5,
+    height: 5,
+    borderRadius: 99,
   },
 });

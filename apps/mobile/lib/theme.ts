@@ -34,6 +34,11 @@ export const colors = {
   errorSubtle: '#FF575718',
   warning:     '#F5A623',   // reuse amber for warning — same palette
 
+  // Pipeline step colors (Moments list cards)
+  pipelineQueued:      '#F5A623',   // step 1 — amber (matches brand)
+  pipelineTranscribing:'#7B9FE8',   // step 2 — slate blue
+  pipelineEnriching:   '#B87FD4',   // step 3 — soft purple
+
   // Absolute
   white:       '#FFFFFF',
   black:       '#000000',
