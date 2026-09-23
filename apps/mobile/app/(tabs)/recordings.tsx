@@ -146,7 +146,10 @@ export default function RecordingsScreen() {
   useEffect(() => {
     if (!didMountRef.current) { didMountRef.current = true; return; }
     if (debounceRef.current) clearTimeout(debounceRef.current);
-    debounceRef.current = setTimeout(() => { void fetchRecordings(query); }, 300);
+    // Fire immediately when clearing; otherwise wait for 3+ chars and a 500ms pause.
+    if (query === '' || query.length >= 3) {
+      debounceRef.current = setTimeout(() => { void fetchRecordings(query); }, query === '' ? 0 : 500);
+    }
     return () => { if (debounceRef.current) clearTimeout(debounceRef.current); };
   }, [query, fetchRecordings]);
 
