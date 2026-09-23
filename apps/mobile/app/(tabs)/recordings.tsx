@@ -194,7 +194,7 @@ export default function RecordingsScreen() {
 
       <FlatList
         data={recordings}
-        keyExtractor={(item) => item._id}
+        keyExtractor={(item) => `${item._id}:${query}`}
         renderItem={({ item }) => (
           <RecordingCard
             recording={item}
