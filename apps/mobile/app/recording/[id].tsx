@@ -803,7 +803,7 @@ const styles = StyleSheet.create({
   // Title
   titleContainer: {
     flexDirection: 'row',
-    alignItems: 'flex-start',
+    alignItems: 'center',
     gap: spacing.xs,
   },
   title: {
@@ -813,9 +813,7 @@ const styles = StyleSheet.create({
     color: colors.cream,
     letterSpacing: 0.5,
   },
-  editIcon: {
-    marginTop: 6, // optically align with first line of title text
-  },
+  editIcon: {},
   editRow: {
     marginBottom: spacing.xxs,
   },
