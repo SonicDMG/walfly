@@ -12,6 +12,7 @@
  */
 
 import React, { useState, useEffect, useCallback, useRef, useMemo, memo } from 'react';
+import { Ionicons } from '@expo/vector-icons';
 import { TagEditor } from '../../components/TagEditor';
 import {
   View,
@@ -289,9 +290,11 @@ export default function RecordingDetailScreen() {
           <Pressable
             style={({ pressed }) => [styles.titleContainer, pressed && styles.pressed]}
             onPress={() => setEditingTitle(true)}
+            accessibilityLabel="Edit title"
+            accessibilityRole="button"
           >
-            <Text style={styles.title}>{recording.title}</Text>
-            <Text style={styles.editHint}>tap to edit title</Text>
+            <Text style={styles.title} numberOfLines={2}>{recording.title}</Text>
+            <Ionicons name="create-outline" size={18} color={colors.fog} style={styles.editIcon} />
           </Pressable>
         )}
 
@@ -799,18 +802,19 @@ const styles = StyleSheet.create({
 
   // Title
   titleContainer: {
-    gap: 2,
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: spacing.xs,
   },
   title: {
+    flex: 1,
     fontFamily: fonts.title,
     fontSize: fontSizes.xxl,
     color: colors.cream,
     letterSpacing: 0.5,
   },
-  editHint: {
-    fontFamily: fonts.body,
-    fontSize: fontSizes.xs,
-    color: colors.fog,
+  editIcon: {
+    marginTop: 6, // optically align with first line of title text
   },
   editRow: {
     marginBottom: spacing.xxs,
