@@ -18,6 +18,7 @@ import {
   Platform,
   Animated,
 } from 'react-native';
+import { Ionicons } from '@expo/vector-icons';
 import { useFocusEffect, useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { WEB_TAB_BAR_HEIGHT } from './_layout';
@@ -168,17 +169,20 @@ export default function RecordingsScreen() {
 
       {/* Search */}
       <View style={styles.searchRow}>
-        <TextInput
-          style={styles.searchInput}
-          placeholder="search your moments…"
-          placeholderTextColor={colors.fog}
-          value={query}
-          onChangeText={setQuery}
-          clearButtonMode="while-editing"
-          autoCapitalize="none"
-          autoCorrect={false}
-          selectionColor={colors.amber}
-        />
+        <View style={styles.searchContainer}>
+          <Ionicons name="search" size={16} color={colors.fog} style={styles.searchIcon} />
+          <TextInput
+            style={styles.searchInput}
+            placeholder="search your moments…"
+            placeholderTextColor={colors.fog}
+            value={query}
+            onChangeText={setQuery}
+            clearButtonMode="while-editing"
+            autoCapitalize="none"
+            autoCorrect={false}
+            selectionColor={colors.amber}
+          />
+        </View>
       </View>
 
       {error && (
@@ -388,16 +392,25 @@ const styles = StyleSheet.create({
     paddingHorizontal: spacing.md,
     paddingBottom: spacing.sm,
   },
-  searchInput: {
+  searchContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
     backgroundColor: colors.charcoal,
     borderRadius: radius.md,
+    borderWidth: 1,
+    borderColor: colors.border,
     paddingHorizontal: spacing.md,
     paddingVertical: spacing.xs + 2,
+  },
+  searchIcon: {
+    marginRight: spacing.xs,
+  },
+  searchInput: {
+    flex: 1,
     fontSize: fontSizes.base,
     fontFamily: fonts.body,
     color: colors.cream,
-    borderWidth: 1,
-    borderColor: colors.border,
+    padding: 0,
   },
 
   errorRow: {
