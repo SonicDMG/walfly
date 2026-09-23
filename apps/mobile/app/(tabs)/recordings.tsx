@@ -45,9 +45,11 @@ export default function RecordingsScreen() {
   const [loading,    setLoading]    = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error,      setError]      = useState<string | null>(null);
-  // Incremented each time search results arrive — used as FlatList key so cards
-  // remount (and animate in) only when the result set actually changes.
-  const [listEpoch,  setListEpoch]  = useState(0);
+  // Incremented each time a search fetch completes — passed to RecordingCard
+  // so entrance animations replay without remounting the whole FlatList.
+  const [searchEpoch, setSearchEpoch] = useState(0);
+  // Monotonic counter used to discard out-of-order fetch responses.
+  const fetchSeqRef  = useRef(0);
   const debounceRef  = useRef<ReturnType<typeof setTimeout> | null>(null);
   const didMountRef  = useRef(false);
   const mountedRef   = useRef(true);
@@ -97,6 +99,8 @@ export default function RecordingsScreen() {
   );
 
   const fetchRecordings = useCallback(async (q = '') => {
+    // Capture sequence at call time; discard response if a newer fetch has started.
+    const seq = ++fetchSeqRef.current;
     try {
       const url = q
         ? apiUrl(`/api/recordings?q=${encodeURIComponent(q)}`)
@@ -108,14 +112,18 @@ export default function RecordingsScreen() {
         throw new Error(`Could not load recordings (HTTP ${res.status})${detail ? `: ${detail}` : ''}`);
       }
       const data = (await res.json()) as RecordingSummary[];
-      if (!mountedRef.current) return;
+      if (!mountedRef.current || seq !== fetchSeqRef.current) return;
       setRecordings(data);
-      if (q) setListEpoch((e) => e + 1);
+      setSearchEpoch((e) => e + 1);
       setError(null);
     } catch (err) {
-      if (mountedRef.current) setError(describeRequestError(err, 'Could not load recordings'));
+      if (mountedRef.current && seq === fetchSeqRef.current) {
+        setError(describeRequestError(err, 'Could not load recordings'));
+      }
     } finally {
-      if (mountedRef.current) { setLoading(false); setRefreshing(false); }
+      if (mountedRef.current && seq === fetchSeqRef.current) {
+        setLoading(false); setRefreshing(false);
+      }
     }
   }, []);
 
@@ -150,10 +158,12 @@ export default function RecordingsScreen() {
   useEffect(() => {
     if (!didMountRef.current) { didMountRef.current = true; return; }
     if (debounceRef.current) clearTimeout(debounceRef.current);
-    // Fire immediately when clearing; otherwise wait for 3+ chars and a 500ms pause.
-    if (query === '' || query.length >= 3) {
-      debounceRef.current = setTimeout(() => { void fetchRecordings(query); }, query === '' ? 0 : 500);
-    }
+    // 1–2 chars: show all (same as empty) so results never freeze mid-edit.
+    // 3+ chars: wait 500 ms. Clear: small 50 ms delay to let any in-flight
+    // search response be discarded by the sequence check before this arrives.
+    const effective = query.length > 0 && query.length < 3 ? '' : query;
+    const delay     = effective === '' ? 50 : 500;
+    debounceRef.current = setTimeout(() => { void fetchRecordings(effective); }, delay);
     return () => { if (debounceRef.current) clearTimeout(debounceRef.current); };
   }, [query, fetchRecordings]);
 
@@ -200,12 +210,12 @@ export default function RecordingsScreen() {
       )}
 
       <FlatList
-        key={listEpoch}
         data={recordings}
         keyExtractor={(item) => item._id}
         renderItem={({ item }) => (
           <RecordingCard
             recording={item}
+            searchEpoch={searchEpoch}
             onPress={() => router.push(`/recording/${item._id}`)}
           />
         )}
@@ -236,18 +246,17 @@ export default function RecordingsScreen() {
   );
 }
 
-function RecordingCard({ recording, onPress }: { recording: RecordingSummary; onPress: () => void }) {
+function RecordingCard({ recording, searchEpoch, onPress }: { recording: RecordingSummary; searchEpoch: number; onPress: () => void }) {
   const accentColor = STATUS_COLORS[recording.status] ?? colors.mist;
   const pulseAnim  = useRef(new Animated.Value(1)).current;
   const enterAnim  = useRef(new Animated.Value(0)).current;
 
-  // Entrance: fade + slide up on mount
+  // Replay entrance animation whenever the search result set changes.
   useEffect(() => {
     const nativeDriver = Platform.OS !== 'web';
-    Animated.parallel([
-      Animated.timing(enterAnim, { toValue: 1, duration: 220, useNativeDriver: nativeDriver }),
-    ]).start();
-  }, [enterAnim]);
+    enterAnim.setValue(0);
+    Animated.timing(enterAnim, { toValue: 1, duration: 220, useNativeDriver: nativeDriver }).start();
+  }, [searchEpoch, enterAnim]);
 
   useEffect(() => {
     if (!isNonTerminal(recording.status)) {
