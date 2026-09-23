@@ -1,5 +1,5 @@
 /**
- * Tab 2 — Moments (My Recordings)
+ * Tab 2 — Moments
  *
  * Dark-first card list. Amber accents, Fraunces titles.
  * The pipeline self-healing ticker is preserved exactly.
