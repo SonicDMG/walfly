@@ -45,6 +45,9 @@ export default function RecordingsScreen() {
   const [loading,    setLoading]    = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error,      setError]      = useState<string | null>(null);
+  // Incremented each time search results arrive — used as FlatList key so cards
+  // remount (and animate in) only when the result set actually changes.
+  const [listEpoch,  setListEpoch]  = useState(0);
   const debounceRef  = useRef<ReturnType<typeof setTimeout> | null>(null);
   const didMountRef  = useRef(false);
   const mountedRef   = useRef(true);
@@ -107,6 +110,7 @@ export default function RecordingsScreen() {
       const data = (await res.json()) as RecordingSummary[];
       if (!mountedRef.current) return;
       setRecordings(data);
+      if (q) setListEpoch((e) => e + 1);
       setError(null);
     } catch (err) {
       if (mountedRef.current) setError(describeRequestError(err, 'Could not load recordings'));
@@ -196,8 +200,9 @@ export default function RecordingsScreen() {
       )}
 
       <FlatList
+        key={listEpoch}
         data={recordings}
-        keyExtractor={(item) => `${item._id}:${query.length >= 3 ? query : ''}`}
+        keyExtractor={(item) => item._id}
         renderItem={({ item }) => (
           <RecordingCard
             recording={item}
