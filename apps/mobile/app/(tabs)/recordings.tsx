@@ -230,7 +230,16 @@ export default function RecordingsScreen() {
 
 function RecordingCard({ recording, onPress }: { recording: RecordingSummary; onPress: () => void }) {
   const accentColor = STATUS_COLORS[recording.status] ?? colors.mist;
-  const pulseAnim = useRef(new Animated.Value(1)).current;
+  const pulseAnim  = useRef(new Animated.Value(1)).current;
+  const enterAnim  = useRef(new Animated.Value(0)).current;
+
+  // Entrance: fade + slide up on mount
+  useEffect(() => {
+    const nativeDriver = Platform.OS !== 'web';
+    Animated.parallel([
+      Animated.timing(enterAnim, { toValue: 1, duration: 220, useNativeDriver: nativeDriver }),
+    ]).start();
+  }, [enterAnim]);
 
   useEffect(() => {
     if (!isNonTerminal(recording.status)) {
@@ -248,7 +257,10 @@ function RecordingCard({ recording, onPress }: { recording: RecordingSummary; on
     return () => animation.stop();
   }, [recording.status, pulseAnim]);
 
+  const translateY = enterAnim.interpolate({ inputRange: [0, 1], outputRange: [8, 0] });
+
   return (
+    <Animated.View style={{ opacity: enterAnim, transform: [{ translateY }] }}>
     <Pressable
       style={({ pressed }) => [styles.card, pressed && styles.cardPressed]}
       onPress={onPress}
@@ -276,6 +288,7 @@ function RecordingCard({ recording, onPress }: { recording: RecordingSummary; on
         )}
       </View>
     </Pressable>
+    </Animated.View>
   );
 }
 
