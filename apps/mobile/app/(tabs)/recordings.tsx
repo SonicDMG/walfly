@@ -1,5 +1,5 @@
 /**
- * Tab 2 — Moments (My Recordings)
+ * Tab 2 — Moments
  *
  * Dark-first card list. Amber accents, Fraunces titles.
  * The pipeline self-healing ticker is preserved exactly.
@@ -18,6 +18,7 @@ import {
   Platform,
   Animated,
 } from 'react-native';
+import { Ionicons } from '@expo/vector-icons';
 import { useFocusEffect, useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { WEB_TAB_BAR_HEIGHT } from './_layout';
@@ -44,6 +45,9 @@ export default function RecordingsScreen() {
   const [loading,    setLoading]    = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error,      setError]      = useState<string | null>(null);
+  // Incremented each time search results arrive — used as FlatList key so cards
+  // remount (and animate in) only when the result set actually changes.
+  const [listEpoch,  setListEpoch]  = useState(0);
   const debounceRef  = useRef<ReturnType<typeof setTimeout> | null>(null);
   const didMountRef  = useRef(false);
   const mountedRef   = useRef(true);
@@ -106,6 +110,7 @@ export default function RecordingsScreen() {
       const data = (await res.json()) as RecordingSummary[];
       if (!mountedRef.current) return;
       setRecordings(data);
+      if (q) setListEpoch((e) => e + 1);
       setError(null);
     } catch (err) {
       if (mountedRef.current) setError(describeRequestError(err, 'Could not load recordings'));
@@ -145,7 +150,10 @@ export default function RecordingsScreen() {
   useEffect(() => {
     if (!didMountRef.current) { didMountRef.current = true; return; }
     if (debounceRef.current) clearTimeout(debounceRef.current);
-    debounceRef.current = setTimeout(() => { void fetchRecordings(query); }, 300);
+    // Fire immediately when clearing; otherwise wait for 3+ chars and a 500ms pause.
+    if (query === '' || query.length >= 3) {
+      debounceRef.current = setTimeout(() => { void fetchRecordings(query); }, query === '' ? 0 : 500);
+    }
     return () => { if (debounceRef.current) clearTimeout(debounceRef.current); };
   }, [query, fetchRecordings]);
 
@@ -168,17 +176,20 @@ export default function RecordingsScreen() {
 
       {/* Search */}
       <View style={styles.searchRow}>
-        <TextInput
-          style={styles.searchInput}
-          placeholder="search your moments…"
-          placeholderTextColor={colors.fog}
-          value={query}
-          onChangeText={setQuery}
-          clearButtonMode="while-editing"
-          autoCapitalize="none"
-          autoCorrect={false}
-          selectionColor={colors.amber}
-        />
+        <View style={styles.searchContainer}>
+          <Ionicons name="search" size={16} color={colors.fog} style={styles.searchIcon} />
+          <TextInput
+            style={styles.searchInput}
+            placeholder="search your moments…"
+            placeholderTextColor={colors.fog}
+            value={query}
+            onChangeText={setQuery}
+            clearButtonMode="while-editing"
+            autoCapitalize="none"
+            autoCorrect={false}
+            selectionColor={colors.amber}
+          />
+        </View>
       </View>
 
       {error && (
@@ -189,6 +200,7 @@ export default function RecordingsScreen() {
       )}
 
       <FlatList
+        key={listEpoch}
         data={recordings}
         keyExtractor={(item) => item._id}
         renderItem={({ item }) => (
@@ -226,7 +238,16 @@ export default function RecordingsScreen() {
 
 function RecordingCard({ recording, onPress }: { recording: RecordingSummary; onPress: () => void }) {
   const accentColor = STATUS_COLORS[recording.status] ?? colors.mist;
-  const pulseAnim = useRef(new Animated.Value(1)).current;
+  const pulseAnim  = useRef(new Animated.Value(1)).current;
+  const enterAnim  = useRef(new Animated.Value(0)).current;
+
+  // Entrance: fade + slide up on mount
+  useEffect(() => {
+    const nativeDriver = Platform.OS !== 'web';
+    Animated.parallel([
+      Animated.timing(enterAnim, { toValue: 1, duration: 220, useNativeDriver: nativeDriver }),
+    ]).start();
+  }, [enterAnim]);
 
   useEffect(() => {
     if (!isNonTerminal(recording.status)) {
@@ -244,7 +265,10 @@ function RecordingCard({ recording, onPress }: { recording: RecordingSummary; on
     return () => animation.stop();
   }, [recording.status, pulseAnim]);
 
+  const translateY = enterAnim.interpolate({ inputRange: [0, 1], outputRange: [8, 0] });
+
   return (
+    <Animated.View style={{ opacity: enterAnim, transform: [{ translateY }] }}>
     <Pressable
       style={({ pressed }) => [styles.card, pressed && styles.cardPressed]}
       onPress={onPress}
@@ -272,6 +296,7 @@ function RecordingCard({ recording, onPress }: { recording: RecordingSummary; on
         )}
       </View>
     </Pressable>
+    </Animated.View>
   );
 }
 
@@ -388,16 +413,25 @@ const styles = StyleSheet.create({
     paddingHorizontal: spacing.md,
     paddingBottom: spacing.sm,
   },
-  searchInput: {
+  searchContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
     backgroundColor: colors.charcoal,
     borderRadius: radius.md,
+    borderWidth: 1,
+    borderColor: colors.border,
     paddingHorizontal: spacing.md,
     paddingVertical: spacing.xs + 2,
+  },
+  searchIcon: {
+    marginRight: spacing.xs,
+  },
+  searchInput: {
+    flex: 1,
     fontSize: fontSizes.base,
     fontFamily: fonts.body,
     color: colors.cream,
-    borderWidth: 1,
-    borderColor: colors.border,
+    padding: 0,
   },
 
   errorRow: {
