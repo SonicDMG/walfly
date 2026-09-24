@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: walfly-asr
+    runtime: docker
+    dockerfilePath: packages/api/sidecar/Dockerfile
+    plan: standard
+    region: oregon
+    envVars:
+      - key: PORT
+        value: 8888
+      - key: PYTHONUNBUFFERED
+        value: "1"
+    healthCheckPath: /health

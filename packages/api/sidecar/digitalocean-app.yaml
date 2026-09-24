@@ -1,0 +1,13 @@
+name: walfly-asr
+region: nyc
+services:
+  - name: asr-service
+    dockerfile_path: packages/api/sidecar/Dockerfile
+    http_port: 8888
+    instance_count: 1
+    instance_size_slug: basic-m
+    health_check:
+      http_path: /health
+      initial_delay_seconds: 10
+      period_seconds: 15
+      timeout_seconds: 5
