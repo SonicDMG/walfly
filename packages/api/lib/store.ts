@@ -125,6 +125,54 @@ export async function finalizeLiveSession(
   }
 }
 
+export interface AppendChunkInput {
+  recordingId: string;
+  chunkIndex: number;
+  duration: number;
+  offsetMs: number;
+  transcript?: string;
+  deletedAt?: string;
+}
+
+/** Appends or updates a chunk record and deterministic monotonic transcript stitching. */
+export async function recordChunkTranscript(input: AppendChunkInput): Promise<void> {
+  const collection = getRecordingsCollection();
+
+  const doc = await collection.findOne({ _id: input.recordingId });
+  if (!doc) {
+    throw new Error(`Recording ${input.recordingId} not found`);
+  }
+
+  const existingChunks = (doc.chunks || []).filter((c) => c.chunkIndex !== input.chunkIndex);
+  const newChunk = {
+    chunkIndex: input.chunkIndex,
+    duration: input.duration,
+    offsetMs: input.offsetMs,
+    status: 'transcribed' as const,
+    transcript: input.transcript || '',
+    deletedAt: input.deletedAt || new Date().toISOString(),
+  };
+
+  const allChunks = [...existingChunks, newChunk].sort((a, b) => a.chunkIndex - b.chunkIndex);
+
+  // Strictly deterministic stitched transcript
+  const stitchedTranscript = allChunks
+    .map((c) => c.transcript)
+    .filter(Boolean)
+    .join('\n\n');
+
+  await collection.updateOne(
+    { _id: input.recordingId },
+    {
+      $set: {
+        chunks: allChunks,
+        receivedChunks: allChunks.length,
+        transcript: stitchedTranscript,
+      },
+    },
+  );
+}
+
 /** Inserts the initial document. The client kicks /process to advance it. */
 export async function createRecording(input: CreateRecordingInput): Promise<void> {
   const collection = getRecordingsCollection();
