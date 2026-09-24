@@ -156,6 +156,14 @@ export default function RecordScreen() {
         </Pressable>
       </View>
 
+      {/* Live sync & Checkpoint indicators */}
+      {isRecording && (
+        <View style={styles.checkpointBox}>
+          <Ionicons name="cloud-upload-outline" size={16} color={colors.amber} />
+          <Text style={styles.checkpointText}>streaming audio checkpoints</Text>
+        </View>
+      )}
+
       {/* Progress */}
       {(state === 'uploading' || state === 'processing') && (
         <ProgressIndicator variant="bar" progress={progress} />
@@ -261,5 +269,20 @@ const styles = StyleSheet.create({
     color: colors.mist,
     fontSize: fontSizes.xs,
     marginTop: spacing.xxs,
+  },
+  checkpointBox: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.xs,
+    marginTop: spacing.md,
+    paddingHorizontal: spacing.sm,
+    paddingVertical: 4,
+    borderRadius: 12,
+    backgroundColor: colors.charcoal,
+  },
+  checkpointText: {
+    fontFamily: fonts.body,
+    fontSize: fontSizes.xs,
+    color: colors.mist,
   },
 });
