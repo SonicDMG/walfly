@@ -15,11 +15,24 @@ export interface RecordingLocation {
   placeName: string | null;
 }
 
-export type RecordingStatus = 'uploaded' | 'transcribing' | 'enriching' | 'ready' | 'failed';
+export type ChunkStatus = 'uploading' | 'uploaded' | 'transcribing' | 'transcribed' | 'failed';
+
+export interface RecordingChunk {
+  chunkIndex: number;
+  duration: number;
+  offsetMs: number;
+  status: ChunkStatus;
+  transcript?: string | null;
+  deletedAt?: string | null;
+  audioUrl?: string | null;
+}
+
+export type RecordingStatus = 'recording' | 'uploaded' | 'transcribing' | 'enriching' | 'ready' | 'failed';
 
 export type PipelineStage = 'submit' | 'transcribe' | 'enrich' | 'done';
 
 export const NON_TERMINAL_STATUSES: readonly RecordingStatus[] = [
+  'recording',
   'uploaded',
   'transcribing',
   'enriching',
@@ -51,6 +64,11 @@ export interface Recording {
   tags: string[];
   notes: string;
   searchTokens: string[];
+  isLiveSession?: boolean;
+  checkpointSeq?: number;
+  totalExpectedChunks?: number;
+  receivedChunks?: number;
+  chunks?: RecordingChunk[];
 }
 
 /** Projected shape returned by GET /api/recordings. */

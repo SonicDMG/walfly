@@ -82,9 +82,11 @@ export {
 
 export type {
   ApiError,
+  ChunkStatus,
   PipelineStage,
   ProcessResponse,
   Recording,
+  RecordingChunk,
   RecordingLocation,
   RecordingPatch,
   RecordingStatus,

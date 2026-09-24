@@ -15,5 +15,6 @@ export * from './text';
 export type {
   Recording, RecordingLocation, RecordingStatus, RecordingSummary,
   RecordingPatch, PipelineRecord, PipelineStage,
+  RecordingChunk, ChunkStatus,
 } from './types';
 export { NON_TERMINAL_STATUSES } from './types';

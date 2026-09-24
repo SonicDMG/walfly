@@ -42,6 +42,89 @@ export interface CreateRecordingInput {
   placeName: string | null;
 }
 
+export interface CreateLiveSessionInput {
+  id: string;
+  createdAt: string;
+  lat: number | null;
+  lng: number | null;
+  placeName: string | null;
+  title?: string;
+}
+
+/** Initializes a live streaming recording session with checkpoint tracking. */
+export async function createLiveSession(input: CreateLiveSessionInput): Promise<void> {
+  const collection = getRecordingsCollection();
+
+  const hasCoords = typeof input.lat === 'number' && typeof input.lng === 'number';
+  const location: Recording['location'] = {
+    coords: hasCoords ? { lat: input.lat as number, lng: input.lng as number } : null,
+    placeName: input.placeName ? clampIndexedString(input.placeName) : null,
+  };
+
+  const doc: Recording = {
+    _id: input.id,
+    title: clampIndexedString(input.title?.trim() || `Live Recording ${new Date(input.createdAt).toLocaleString()}`),
+    createdAt: input.createdAt,
+    duration: 0,
+    audioUrl: `/api/recordings/audio/${input.id}-session`,
+    audioContentType: 'audio/mp4',
+    location,
+    status: 'recording',
+    doclingTaskId: null,
+    submittedAt: null,
+    leaseUntil: 0,
+    attempts: 0,
+    failedStage: null,
+    error: null,
+    transcript: null,
+    summary: null,
+    keyTakeaways: [],
+    actionItems: [],
+    speakers: [],
+    tags: [],
+    notes: '',
+    searchTokens: [],
+    isLiveSession: true,
+    checkpointSeq: 0,
+    totalExpectedChunks: 0,
+    receivedChunks: 0,
+    chunks: [],
+  };
+
+  console.log(`[Astra] creating live session recording ${input.id}`);
+  await collection.insertOne(doc);
+  console.log(`[Astra] live session ${input.id} initialized → status=recording`);
+}
+
+/** Finalizes a live session and transitions it to processing. */
+export async function finalizeLiveSession(
+  id: string,
+  totalExpectedChunks?: number,
+  duration?: number,
+): Promise<void> {
+  const collection = getRecordingsCollection();
+  console.log(`[Astra] finalizing live session ${id}`);
+
+  const $set: Record<string, any> = {
+    status: 'uploaded',
+  };
+  if (typeof totalExpectedChunks === 'number') {
+    $set.totalExpectedChunks = totalExpectedChunks;
+  }
+  if (typeof duration === 'number') {
+    $set.duration = duration;
+  }
+
+  const res = await collection.updateOne(
+    { _id: id, isLiveSession: true },
+    { $set },
+  );
+
+  if (res.matchedCount === 0) {
+    throw new Error(`Live recording session ${id} not found`);
+  }
+}
+
 /** Inserts the initial document. The client kicks /process to advance it. */
 export async function createRecording(input: CreateRecordingInput): Promise<void> {
   const collection = getRecordingsCollection();

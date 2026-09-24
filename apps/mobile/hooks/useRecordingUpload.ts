@@ -87,6 +87,7 @@ const PROCESSING_DEADLINE_MS = 20 * 60 * 1000;
 const AUTO_RESET_MS = 2000;
 
 const PROGRESS_BY_STATUS: Record<RecordingStatus, number> = {
+  recording: 0.2,
   uploaded: 0.55,
   transcribing: 0.7,
   enriching: 0.9,

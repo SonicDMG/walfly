@@ -680,6 +680,7 @@ function NativeAudioPlayer({
 // ─── Sub-components ──────────────────────────────────────────────────────────
 
 const STATUS_LABELS: Record<RecordingStatus, string> = {
+  recording:    'recording in progress…',
   uploaded:     'queued for transcription',
   transcribing: 'transcribing…',
   enriching:    'writing summary…',

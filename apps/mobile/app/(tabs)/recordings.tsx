@@ -310,6 +310,7 @@ function RecordingCard({ recording, searchEpoch, onPress }: { recording: Recordi
 }
 
 const STATUS_LABELS: Record<RecordingStatus, string> = {
+  recording:   'recording',
   uploaded:    'queued',
   transcribing:'transcribing',
   enriching:   'enriching',
@@ -318,6 +319,7 @@ const STATUS_LABELS: Record<RecordingStatus, string> = {
 };
 
 const STATUS_COLORS: Record<RecordingStatus, string> = {
+  recording:   colors.amber,
   uploaded:    colors.pipelineQueued,
   transcribing:colors.pipelineTranscribing,
   enriching:   colors.pipelineEnriching,

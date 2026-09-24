@@ -12,19 +12,31 @@ export interface RecordingLocation {
   placeName: string | null;
 }
 
-/** Pipeline states. `uploaded`/`transcribing`/`enriching` are non-terminal. */
-export type RecordingStatus = 'uploaded' | 'transcribing' | 'enriching' | 'ready' | 'failed';
+export type ChunkStatus = 'uploading' | 'uploaded' | 'transcribing' | 'transcribed' | 'failed';
+
+export interface RecordingChunk {
+  chunkIndex: number;
+  duration: number;               // seconds
+  offsetMs: number;               // offset from start of recording in ms
+  status: ChunkStatus;
+  transcript?: string | null;
+  deletedAt?: string | null;      // ISO 8601 string when ephemeral audio was deleted
+  audioUrl?: string | null;
+}
+
+/** Pipeline states. `uploaded`/`transcribing`/`enriching`/`recording` are non-terminal. */
+export type RecordingStatus = 'recording' | 'uploaded' | 'transcribing' | 'enriching' | 'ready' | 'failed';
 
 export type PipelineStage = 'submit' | 'transcribe' | 'enrich' | 'done';
 
-export const NON_TERMINAL_STATUSES: readonly RecordingStatus[] = ['uploaded', 'transcribing', 'enriching'];
+export const NON_TERMINAL_STATUSES: readonly RecordingStatus[] = ['recording', 'uploaded', 'transcribing', 'enriching'];
 
 export interface Recording {
   _id: string;
   title: string;
   createdAt: string;              // ISO 8601, always UTC with milliseconds
   duration: number;               // seconds
-  audioUrl: string;               // absolute Blob URL, or /api/recordings/audio/<name> in local dev
+  audioUrl: string;               // absolute Blob URL, or /api/recordings/audio/<name> in local dev (or placeholder for live session)
   audioContentType: string;       // the container we actually stored, e.g. audio/mp4
   location: RecordingLocation | null;
   status: RecordingStatus;
@@ -44,6 +56,11 @@ export interface Recording {
   searchTokens: string[];         // lowercased tokens for the portable keyword fallback
   $vectorize?: string;            // bounded (<= VECTORIZE_MAX_CHARS)
   $lexical?: string;              // full transcript; only when capabilities.lexical
+  isLiveSession?: boolean;
+  checkpointSeq?: number;
+  totalExpectedChunks?: number;
+  receivedChunks?: number;
+  chunks?: RecordingChunk[];
 }
 
 /** Projected shape returned by GET /api/recordings. */
