@@ -141,14 +141,26 @@ def _run_transcription(task_id: str, audio_path: Path) -> None:
     log.info("[%s] Starting docling transcription of %s (%d bytes)",
              task_id, audio_path.name, audio_path.stat().st_size)
     try:
+        import torch
         from docling.datamodel import asr_model_specs
         from docling.datamodel.base_models import InputFormat
-        from docling.datamodel.pipeline_options import AsrPipelineOptions
+        from docling.datamodel.pipeline_options import AcceleratorOptions, AsrPipelineOptions
         from docling.document_converter import AudioFormatOption, DocumentConverter
         from docling.pipeline.asr_pipeline import AsrPipeline
 
+        # Docling's 'auto' mode misses MPS on Apple Silicon in some versions,
+        # so we resolve the best available device explicitly.
+        if torch.backends.mps.is_built() and torch.backends.mps.is_available():
+            _device = "mps"
+        elif torch.backends.cuda.is_built() and torch.cuda.is_available():
+            _device = "cuda"
+        else:
+            _device = "cpu"
+        log.info("[%s] Selected accelerator device: %s", task_id, _device)
+
         pipeline_options = AsrPipelineOptions()
         pipeline_options.asr_options = asr_model_specs.WHISPER_TURBO
+        pipeline_options.accelerator_options = AcceleratorOptions(device=_device)
 
         converter = DocumentConverter(
             format_options={
