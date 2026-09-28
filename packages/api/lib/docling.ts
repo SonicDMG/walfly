@@ -80,13 +80,14 @@ export interface AudioContainer {
 }
 
 /** MIME types Docling's ASR pipeline accepts, keyed by the extension we send. */
-export const ASR_EXT_TO_MIME: Record<Exclude<AudioExt, 'webm'>, string> = {
+export const ASR_EXT_TO_MIME: Record<AudioExt, string> = {
   wav: 'audio/wav',
   mp3: 'audio/mpeg',
   m4a: 'audio/mp4',
   aac: 'audio/aac',
   ogg: 'audio/ogg',
   flac: 'audio/flac',
+  webm: 'audio/webm',
 };
 
 /** MIME types the upload endpoint advertises to clients. Bytes remain authoritative. */
@@ -135,14 +136,7 @@ export function normalizeAudioForAsr(input: Uint8Array, filenameHint = 'recordin
   if (!container) {
     throw new DoclingError(
       'unsupported_media',
-      'Unrecognised audio container. Expected WAV, MP3, M4A/AAC-in-MP4, AAC, OGG or FLAC.',
-    );
-  }
-  if (container.ext === 'webm') {
-    throw new DoclingError(
-      'unsupported_media',
-      'WebM/Matroska is a video container: Docling routes it to the video pipeline, never to ASR. ' +
-        'Record audio/mp4 or audio/ogg on the client instead — relabelling the MIME type does not change the bytes.',
+      'Unrecognised audio container. Expected WAV, MP3, M4A/AAC-in-MP4, AAC, OGG, FLAC, or WebM.',
     );
   }
 

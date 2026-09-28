@@ -23,9 +23,10 @@ export async function POST(
 
     const arrayBuffer = await audioFile.arrayBuffer();
     const bytes = new Uint8Array(arrayBuffer);
+    const audioFilename = (audioFile as File).name || `chunk-${chunkIndex}.webm`;
 
     // Ephemeral Transcription: send bytes straight to sidecar/ASR service
-    const transcript = await transcribeAudioBytes(bytes, `chunk-${chunkIndex}.mp4`, offsetMs);
+    const transcript = await transcribeAudioBytes(bytes, audioFilename, offsetMs);
 
     // Record stitched transcript and mark chunk as transcribed + purged
     await recordChunkTranscript({

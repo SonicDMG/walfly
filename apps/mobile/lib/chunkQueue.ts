@@ -27,6 +27,22 @@ class ChunkUploadQueue {
     this.processQueue();
   }
 
+  public getPendingCount(): number {
+    return this.queue.length;
+  }
+
+  public async drain(): Promise<void> {
+    if (this.queue.length === 0 && !this.isProcessing) return;
+    return new Promise((resolve) => {
+      const check = setInterval(() => {
+        if (this.queue.length === 0 && !this.isProcessing) {
+          clearInterval(check);
+          resolve();
+        }
+      }, 100);
+    });
+  }
+
   public onChunkUploaded(callback: (recordingId: string, chunkIndex: number) => void) {
     this.onChunkUploadedCallbacks.push(callback);
     return () => {
@@ -68,7 +84,14 @@ class ChunkUploadQueue {
       formData.append('duration', String(chunk.duration));
 
       if (chunk.blob) {
-        formData.append('audio', chunk.blob, `chunk-${chunk.chunkIndex}.mp4`);
+        const ext = chunk.blob.type.includes('wav')
+          ? 'wav'
+          : chunk.blob.type.includes('ogg')
+          ? 'ogg'
+          : chunk.blob.type.includes('mp4') || chunk.blob.type.includes('m4a')
+          ? 'm4a'
+          : 'webm';
+        formData.append('audio', chunk.blob, `chunk-${chunk.chunkIndex}.${ext}`);
       } else if (chunk.uri) {
         formData.append('audio', {
           uri: chunk.uri,

@@ -74,7 +74,7 @@ export type RecordingSummary = Pick<
 export type PipelineRecord = Pick<
   Recording,
   '_id' | 'status' | 'audioUrl' | 'audioContentType' | 'doclingTaskId'
-  | 'transcript' | 'leaseUntil' | 'submittedAt' | 'attempts'
+  | 'transcript' | 'leaseUntil' | 'submittedAt' | 'attempts' | 'isLiveSession'
 >;
 
 /** Fields a client may change. `placeName` maps to the nested location field. */

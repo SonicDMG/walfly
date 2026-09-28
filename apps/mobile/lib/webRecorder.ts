@@ -39,6 +39,8 @@ export interface WebRecordingHandle {
 export async function startWebRecording(options: {
   mimeTypes: readonly string[];
   audioBitsPerSecond?: number;
+  onChunk?: (chunkBlob: Blob, durationMillis: number) => void;
+  chunkIntervalMs?: number;
 }): Promise<WebRecordingHandle> {
   const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
 
@@ -48,75 +50,121 @@ export async function startWebRecording(options: {
     ...(options.audioBitsPerSecond ? { audioBitsPerSecond: options.audioBitsPerSecond } : {}),
   });
 
-  const chunks: Blob[] = [];
+  const allRecordedChunks: Blob[] = [];
   const startedAt = Date.now();
-  let endedEarly = false;
+  let currentRecorder: MediaRecorder | null = null;
+  let currentChunkBlobs: Blob[] = [];
+  let chunkStartTime = startedAt;
+  let isStopped = false;
   let settle: ((result: WebRecordingResult) => void) | null = null;
+  let chunkTimer: ReturnType<typeof setInterval> | null = null;
 
-  const releaseStream = () => stream.getTracks().forEach((track) => track.stop());
-
-  const finalize = () => {
-    releaseStream();
-    document.removeEventListener('visibilitychange', flushOnHide);
-    if (!settle) return;
-    const resolve = settle;
-    settle = null;
-    resolve({
-      blob: new Blob(chunks, { type: recorder.mimeType || mimeType || 'audio/webm' }),
-      durationMillis: Date.now() - startedAt,
-      endedEarly,
+  const createSegmentRecorder = () => {
+    const rec = new MediaRecorder(stream, {
+      ...(mimeType ? { mimeType } : {}),
+      ...(options.audioBitsPerSecond ? { audioBitsPerSecond: options.audioBitsPerSecond } : {}),
     });
+
+    rec.addEventListener('dataavailable', (event: BlobEvent) => {
+      if (event.data.size > 0) {
+        currentChunkBlobs.push(event.data);
+        allRecordedChunks.push(event.data);
+      }
+    });
+
+    return rec;
   };
 
-  const flushOnHide = () => {
-    if (document.visibilityState === 'hidden' && recorder.state === 'recording') {
-      recorder.requestData();
+  currentRecorder = createSegmentRecorder();
+
+  const cycleChunk = () => {
+    if (isStopped || !currentRecorder) return;
+
+    const oldRecorder = currentRecorder;
+    const oldBlobs = currentChunkBlobs;
+    const chunkDuration = Date.now() - chunkStartTime;
+
+    // Start next segment with a fresh standalone MediaRecorder instance
+    currentChunkBlobs = [];
+    chunkStartTime = Date.now();
+    currentRecorder = createSegmentRecorder();
+    currentRecorder.start();
+
+    // Stop old segment — when stop fires, emit complete standalone container
+    oldRecorder.addEventListener('stop', () => {
+      if (oldBlobs.length > 0 && options.onChunk) {
+        const sliceBlob = new Blob(oldBlobs, { type: oldRecorder.mimeType || mimeType || 'audio/webm' });
+        options.onChunk(sliceBlob, chunkDuration);
+      }
+    });
+
+    if (oldRecorder.state !== 'inactive') {
+      try {
+        oldRecorder.stop();
+      } catch {}
     }
   };
 
-  recorder.addEventListener('dataavailable', (event: BlobEvent) => {
-    if (event.data.size > 0) chunks.push(event.data);
-  });
-  recorder.addEventListener('stop', finalize);
-  // The engine still fires a trailing dataavailable + stop pair for this per
-  // spec, so no separate handling is needed here beyond noting it happened.
-  recorder.addEventListener('error', () => {
-    endedEarly = true;
-  });
-  document.addEventListener('visibilitychange', flushOnHide);
+  const releaseStream = () => stream.getTracks().forEach((track) => track.stop());
 
-  recorder.start(DEFAULT_TIMESLICE_MS);
+  currentRecorder.start();
+
+  if (options.chunkIntervalMs && options.onChunk) {
+    chunkTimer = setInterval(() => {
+      cycleChunk();
+    }, options.chunkIntervalMs);
+  }
 
   return {
     stop() {
       return new Promise<WebRecordingResult>((resolve) => {
-        settle = resolve;
-        if (recorder.state === 'inactive') {
-          // Already halted before this call landed — no more chunks are coming.
-          endedEarly = true;
-          finalize();
-          return;
+        isStopped = true;
+        if (chunkTimer) {
+          clearInterval(chunkTimer);
+          chunkTimer = null;
         }
-        setTimeout(() => {
-          if (settle) {
-            endedEarly = true;
-            finalize();
+
+        const activeRec = currentRecorder;
+        const lastBlobs = currentChunkBlobs;
+        const lastDuration = Date.now() - chunkStartTime;
+
+        const onFinalStop = () => {
+          if (lastBlobs.length > 0 && options.onChunk) {
+            const sliceBlob = new Blob(lastBlobs, { type: activeRec?.mimeType || mimeType || 'audio/webm' });
+            options.onChunk(sliceBlob, lastDuration);
           }
-        }, STOP_EVENT_FALLBACK_MS);
-        recorder.stop();
+          releaseStream();
+          resolve({
+            blob: new Blob(allRecordedChunks, { type: activeRec?.mimeType || mimeType || 'audio/webm' }),
+            durationMillis: Date.now() - startedAt,
+            endedEarly: false,
+          });
+        };
+
+        if (!activeRec || activeRec.state === 'inactive') {
+          onFinalStop();
+        } else {
+          activeRec.addEventListener('stop', onFinalStop);
+          try {
+            activeRec.stop();
+          } catch {
+            onFinalStop();
+          }
+        }
       });
     },
     cancel() {
-      settle = null;
-      document.removeEventListener('visibilitychange', flushOnHide);
-      if (recorder.state !== 'inactive') {
-        try {
-          recorder.stop();
-        } catch {
-          // Already stopping/stopped.
-        }
+      isStopped = true;
+      if (chunkTimer) {
+        clearInterval(chunkTimer);
+        chunkTimer = null;
       }
       releaseStream();
+      if (currentRecorder && currentRecorder.state !== 'inactive') {
+        try {
+          currentRecorder.stop();
+        } catch {}
+      }
     },
   };
 }

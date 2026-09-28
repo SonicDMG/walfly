@@ -55,6 +55,9 @@ import { useLocationPermission, type LocationSnapshot } from './useLocationPermi
 import { transcodeToWav } from '../lib/audio-wav';
 // Web-only in practice; every browser API reference inside is guarded at call time.
 import { startWebRecording, type WebRecordingHandle } from '../lib/webRecorder';
+import { chunkUploadQueue } from '../lib/chunkQueue';
+
+const ACTIVE_SESSION_STORAGE_KEY = 'walfly_active_recording_session';
 
 export type RecordState =
   | 'idle'
@@ -150,6 +153,8 @@ export function useRecordingUpload() {
   const locationPromiseRef = useRef<Promise<LocationSnapshot | null> | null>(null);
   const autoResetTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const maxDurationTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const activeSessionIdRef = useRef<string | null>(null);
+  const chunkIndexCounterRef = useRef<number>(0);
   const abortRef = useRef<AbortController | null>(null);
   const stopRef = useRef<() => void>(() => undefined);
 
@@ -194,6 +199,26 @@ export function useRecordingUpload() {
 
   useEffect(() => {
     mountedRef.current = true;
+
+    // Check for orphaned/interrupted sessions from previous runs
+    if (typeof window !== 'undefined' && window.localStorage) {
+      try {
+        const orphanSessionId = window.localStorage.getItem(ACTIVE_SESSION_STORAGE_KEY);
+        if (orphanSessionId) {
+          console.log(`[Crash Recovery] Found orphaned session: ${orphanSessionId}. Finalizing...`);
+          void fetch(apiUrl(`/api/recordings/${encodeURIComponent(orphanSessionId)}/finalize`), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({}),
+          }).finally(() => {
+            try {
+              window.localStorage.removeItem(ACTIVE_SESSION_STORAGE_KEY);
+            } catch {}
+          });
+        }
+      } catch {}
+    }
+
     return () => {
       mountedRef.current = false;
       clearTimers();
@@ -230,7 +255,27 @@ export function useRecordingUpload() {
       locationPromiseRef.current = requestAndCapture();
 
       startTimestampRef.current = new Date().toISOString();
-      startedAtRef.current = Date.now();
+      const startedAt = Date.now();
+      startedAtRef.current = startedAt;
+      chunkIndexCounterRef.current = 0;
+
+      // Initialize live session on server
+      const sessionId = (globalThis.crypto?.randomUUID ? globalThis.crypto.randomUUID() : `rec-${Date.now()}`);
+      activeSessionIdRef.current = sessionId;
+      if (typeof window !== 'undefined' && window.localStorage) {
+        try {
+          window.localStorage.setItem(ACTIVE_SESSION_STORAGE_KEY, sessionId);
+        } catch {}
+      }
+
+      void fetch(apiUrl('/api/recordings/session'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          id: sessionId,
+          createdAt: startTimestampRef.current,
+        }),
+      }).catch((e) => console.warn('[Live Session] Error initializing session:', e));
 
       await setAudioModeAsync(RECORD_AUDIO_MODE);
 
@@ -238,6 +283,21 @@ export function useRecordingUpload() {
         webRecordingRef.current = await startWebRecording({
           mimeTypes: WEB_MIME_PREFERENCE,
           audioBitsPerSecond: 32000,
+          chunkIntervalMs: 15000,
+          onChunk: (chunkBlob, durationMillis) => {
+            if (!activeSessionIdRef.current) return;
+            const currentIdx = chunkIndexCounterRef.current++;
+            const offsetMs = Math.max(0, Date.now() - startedAtRef.current - durationMillis);
+
+            chunkUploadQueue.enqueue({
+              recordingId: activeSessionIdRef.current,
+              chunkIndex: currentIdx,
+              offsetMs,
+              duration: durationMillis / 1000,
+              blob: chunkBlob,
+              attempts: 0,
+            });
+          },
         });
       } else {
         const recorder = new AudioModule.AudioRecorder(recordingOptions());
@@ -341,46 +401,80 @@ export function useRecordingUpload() {
         return;
       }
 
-      formData.append('duration', String(durationSec));
-      formData.append('clientTimestamp', startTimestampRef.current);
-
-      const snapshot = await raceLocation(locationPromiseRef.current);
-      locationPromiseRef.current = null;
-      if (snapshot) {
-        formData.append('lat', String(snapshot.coords.lat));
-        formData.append('lng', String(snapshot.coords.lng));
-        if (snapshot.placeName) formData.append('placeName', snapshot.placeName);
-      }
-
-      safeSetProgress(0.3);
-
+      const currentSessionId = activeSessionIdRef.current;
       const controller = new AbortController();
       abortRef.current = controller;
 
-      // No Content-Type header: the runtime must generate the multipart boundary.
-      let uploadRes: Response;
-      try {
-        uploadRes = await fetch(apiUrl('/api/recordings/upload'), {
+      let targetRecordingId: string;
+
+      if (currentSessionId && isWeb) {
+        // Wait for any in-flight chunks to drain
+        safeSetProgress(0.2);
+        await chunkUploadQueue.drain();
+
+        // Finalize the live session
+        safeSetProgress(0.3);
+        const finRes = await fetch(apiUrl(`/api/recordings/${encodeURIComponent(currentSessionId)}/finalize`), {
           method: 'POST',
-          body: formData,
-          signal: controller.signal,
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            totalExpectedChunks: chunkIndexCounterRef.current,
+            duration: durationSec,
+          }),
         });
-      } catch (err) {
-        throw new Error(describeRequestError(err, 'Upload failed'));
+
+        if (!finRes.ok) {
+          throw new Error(`Session finalize failed (${finRes.status}): ${await readError(finRes)}`);
+        }
+
+        if (typeof window !== 'undefined' && window.localStorage) {
+          try {
+            window.localStorage.removeItem(ACTIVE_SESSION_STORAGE_KEY);
+          } catch {}
+        }
+        activeSessionIdRef.current = null;
+        targetRecordingId = currentSessionId;
+      } else {
+        formData.append('duration', String(durationSec));
+        formData.append('clientTimestamp', startTimestampRef.current);
+
+        const snapshot = await raceLocation(locationPromiseRef.current);
+        locationPromiseRef.current = null;
+        if (snapshot) {
+          formData.append('lat', String(snapshot.coords.lat));
+          formData.append('lng', String(snapshot.coords.lng));
+          if (snapshot.placeName) formData.append('placeName', snapshot.placeName);
+        }
+
+        safeSetProgress(0.3);
+
+        // No Content-Type header: the runtime must generate the multipart boundary.
+        let uploadRes: Response;
+        try {
+          uploadRes = await fetch(apiUrl('/api/recordings/upload'), {
+            method: 'POST',
+            body: formData,
+            signal: controller.signal,
+          });
+        } catch (err) {
+          throw new Error(describeRequestError(err, 'Upload failed'));
+        }
+
+        if (!uploadRes.ok) {
+          throw new Error(`Upload failed (${uploadRes.status}): ${await readError(uploadRes)}`);
+        }
+
+        const uploaded = (await uploadRes.json()) as UploadResponse;
+        targetRecordingId = uploaded.id;
       }
 
-      if (!uploadRes.ok) {
-        throw new Error(`Upload failed (${uploadRes.status}): ${await readError(uploadRes)}`);
-      }
-
-      const uploaded = (await uploadRes.json()) as UploadResponse;
       safeSetProgress(PROGRESS_BY_STATUS.uploaded);
       safeSetState('processing');
 
-      await drivePipeline(uploaded.id, controller.signal, safeSetProgress);
+      await drivePipeline(targetRecordingId, controller.signal, safeSetProgress);
 
       if (!mountedRef.current) return;
-      setResult({ id: uploaded.id });
+      setResult({ id: targetRecordingId });
       setProgress(1);
       setState('done');
 

@@ -233,6 +233,7 @@ export async function getPipelineRecord(id: string): Promise<PipelineRecord | nu
         leaseUntil: 1,
         submittedAt: 1,
         attempts: 1,
+        isLiveSession: 1,
       },
     },
   );
@@ -253,6 +254,7 @@ export async function getPipelineRecord(id: string): Promise<PipelineRecord | nu
     leaseUntil: typeof doc.leaseUntil === 'number' ? doc.leaseUntil : 0,
     submittedAt: typeof doc.submittedAt === 'number' ? doc.submittedAt : null,
     attempts: typeof doc.attempts === 'number' ? doc.attempts : 0,
+    isLiveSession: doc.isLiveSession ?? false,
   };
 }
 

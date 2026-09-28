@@ -50,10 +50,10 @@ function sidecarUrl(): string {
  */
 export async function transcribeAudioBytes(
   bytes: Uint8Array,
-  filename: string = 'chunk.mp4',
+  filename: string = 'chunk.webm',
   offsetMs: number = 0,
 ): Promise<string> {
-  const normalized = normalizeAudioForAsr(bytes, 'chunk');
+  const normalized = normalizeAudioForAsr(bytes, filename);
 
   const form = new FormData();
   form.append(

@@ -73,13 +73,28 @@ export async function advanceRecording(id: string): Promise<AdvanceResult> {
       return { found: true, id, status: record.status, stage: 'done', error: null, retryAfterMs: 0 };
     }
 
-    // ---- uploaded → transcribe (single synchronous Whisper call) ---------
+    // Live session currently recording: wait for finalize
+    if (record.status === 'recording') {
+      return waiting(id, 'recording', 'submit', 3000);
+    }
+
+    // ---- uploaded → transcribe or transition live session to enrich ------
     if (record.status === 'uploaded') {
       stage = 'transcribe';
       if (!(await acquireLease(id, 'uploaded', LEASE_TRANSCRIBE_MS))) {
         return waiting(id, 'uploaded', 'transcribe', 2000);
       }
-      const markdown = await transcribeAudio(record.audioUrl);
+
+      // If this was a live session, chunks have already been transcribed incrementally.
+      let markdown = record.transcript;
+      if (!record.isLiveSession) {
+        markdown = await transcribeAudio(record.audioUrl);
+      }
+
+      if (!markdown || !markdown.trim()) {
+        throw new Error('No transcript available for recording');
+      }
+
       await storeTranscript(id, markdown);
       console.log(`[pipeline] ${id} transcript stored (${markdown.length} chars)`);
       return { found: true, id, status: 'enriching', stage: 'enrich', error: null, retryAfterMs: 1000 };
