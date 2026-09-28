@@ -2,6 +2,7 @@ import { useEffect } from 'react';
 import { Stack } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
 import * as SplashScreen from 'expo-splash-screen';
+import { sweepOrphanedChunkFiles } from '../lib/chunkQueue';
 import {
   useFonts,
   PlayfairDisplay_600SemiBold,
@@ -23,6 +24,12 @@ export default function RootLayout() {
     Inter_500Medium,
     Inter_600SemiBold,
   });
+
+  useEffect(() => {
+    // One-time cleanup of .m4a chunk files left over from sessions before
+    // per-chunk cleanup was added.
+    sweepOrphanedChunkFiles();
+  }, []);
 
   useEffect(() => {
     if (fontsLoaded) SplashScreen.hideAsync();

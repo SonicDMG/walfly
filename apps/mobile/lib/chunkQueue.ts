@@ -5,7 +5,7 @@
  * Handles background chunk uploads, exponential backoff, and local cleanup.
  */
 
-import { File as ExpoFile } from 'expo-file-system';
+import { Directory, File as ExpoFile, Paths } from 'expo-file-system';
 import { apiUrl } from './api';
 
 export interface QueuedChunk {
@@ -68,8 +68,8 @@ class ChunkUploadQueue {
           try {
             const file = new ExpoFile(chunk.uri);
             if (file.exists) file.delete();
-          } catch {
-            // Best effort cleanup
+          } catch (cleanupErr) {
+            console.warn('[ChunkQueue] Failed to delete temp chunk file:', chunk.uri, cleanupErr);
           }
         }
       } else {
@@ -77,6 +77,15 @@ class ChunkUploadQueue {
         if (chunk.attempts > 5) {
           console.error(`[ChunkQueue] Dropping chunk ${chunk.chunkIndex} after 5 failed attempts`);
           this.queue.shift();
+          // Clean up the local file even when the upload is abandoned
+          if (chunk.uri) {
+            try {
+              const file = new ExpoFile(chunk.uri);
+              if (file.exists) file.delete();
+            } catch (cleanupErr) {
+              console.warn('[ChunkQueue] Failed to delete temp chunk file after drop:', chunk.uri, cleanupErr);
+            }
+          }
         } else {
           // Delay before retrying
           await new Promise((r) => setTimeout(r, Math.min(1000 * Math.pow(2, chunk.attempts), 10000)));
@@ -128,3 +137,28 @@ class ChunkUploadQueue {
 }
 
 export const chunkUploadQueue = new ChunkUploadQueue();
+
+/**
+ * Sweeps the expo cache directory for orphaned .m4a chunk files left over
+ * from sessions that ended before cleanup was introduced. Safe to call once
+ * at app startup — audioUrl values in the DB are always remote URLs, so no
+ * locally cached .m4a is needed after a session ends.
+ */
+export function sweepOrphanedChunkFiles(): void {
+  let entries: (Directory | ExpoFile)[];
+  try {
+    entries = Paths.cache.list();
+  } catch {
+    return; // cache dir unreadable — skip
+  }
+
+  for (const entry of entries) {
+    if (entry instanceof Directory) continue;
+    if (!entry.uri.endsWith('.m4a')) continue;
+    try {
+      if (entry.exists) entry.delete();
+    } catch (err) {
+      console.warn('[ChunkQueue] sweepOrphanedChunkFiles: failed to delete', entry.uri, err);
+    }
+  }
+}

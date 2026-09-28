@@ -151,6 +151,8 @@ export function useRecordingUpload() {
   const startedAtRef = useRef(0);
   const chunkStartTimeRef = useRef(0);
   const nativeChunkTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const isRotatingRef = useRef(false);
+  const nativeChunkStoppedRef = useRef(false);
   const startTimestampRef = useRef('');
   const locationPromiseRef = useRef<Promise<LocationSnapshot | null> | null>(null);
   const autoResetTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -313,14 +315,19 @@ export function useRecordingUpload() {
         recordingRef.current = initialRecorder;
 
         // Rolling segment rotation on native (every 15s)
+        nativeChunkStoppedRef.current = false;
         nativeChunkTimerRef.current = setInterval(async () => {
+          if (nativeChunkStoppedRef.current) return;
           if (!activeSessionIdRef.current || !recordingRef.current) return;
+          if (isRotatingRef.current) return; // skip if previous rotation still in progress
 
+          isRotatingRef.current = true;
           const oldRec = recordingRef.current;
           const currentIdx = chunkIndexCounterRef.current++;
-          const chunkDurationMs = Date.now() - chunkStartTimeRef.current;
+          const now = Date.now();
+          const chunkDurationMs = now - chunkStartTimeRef.current;
           const offsetMs = Math.max(0, chunkStartTimeRef.current - startedAtRef.current);
-          chunkStartTimeRef.current = Date.now();
+          chunkStartTimeRef.current = now;
 
           // Prepare next recorder segment before stopping old
           try {
@@ -343,6 +350,8 @@ export function useRecordingUpload() {
             }
           } catch (cycleErr) {
             console.warn('[Native Chunking] Error rotating chunk segment:', cycleErr);
+          } finally {
+            isRotatingRef.current = false;
           }
         }, 15000);
       }
@@ -380,6 +389,7 @@ export function useRecordingUpload() {
       maxDurationTimerRef.current = null;
     }
     if (nativeChunkTimerRef.current) {
+      nativeChunkStoppedRef.current = true; // prevent any queued interval callback from racing
       clearInterval(nativeChunkTimerRef.current);
       nativeChunkTimerRef.current = null;
     }
@@ -417,6 +427,11 @@ export function useRecordingUpload() {
         }
 
         const uri = recording.uri;
+        if (!uri) {
+          console.error('[stopAndUpload] Final native segment has no URI — last audio segment will be missing.', {
+            sessionId: activeSessionIdRef.current,
+          });
+        }
         durationSec = Math.max(
           1,
           Math.round((Date.now() - startedAtRef.current) / 1000),
@@ -425,7 +440,8 @@ export function useRecordingUpload() {
         // Enqueue final native segment
         if (uri && activeSessionIdRef.current) {
           const finalIdx = chunkIndexCounterRef.current++;
-          const finalDurationMs = Date.now() - chunkStartTimeRef.current;
+          const now = Date.now();
+          const finalDurationMs = now - chunkStartTimeRef.current;
           const offsetMs = Math.max(0, chunkStartTimeRef.current - startedAtRef.current);
           chunkUploadQueue.enqueue({
             recordingId: activeSessionIdRef.current,
