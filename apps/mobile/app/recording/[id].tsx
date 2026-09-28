@@ -55,8 +55,8 @@ export default function RecordingDetailScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
 
-  // Validate id at mount — reject anything that isn't a UUID/hex id (CWE-22)
-  const safeId = id && /^[0-9a-f-]{1,64}$/i.test(id) ? id : null;
+  // Validate id at mount — allow UUIDs, alphanumeric IDs, and session IDs (e.g. rec-1234567890)
+  const safeId = id && /^[0-9a-z_-]{1,64}$/i.test(id) ? id : null;
 
   const [recording, setRecording] = useState<Recording | null>(null);
   const [loading, setLoading] = useState(true);
@@ -164,28 +164,37 @@ export default function RecordingDetailScreen() {
     }
   }
 
-  function handleDelete() {
-    Alert.alert(
-      'delete moment',
-      'This will permanently delete the recording and its audio. Are you sure?',
-      [
-        { text: 'Cancel', style: 'cancel' },
-        {
-          text: 'Delete',
-          style: 'destructive',
-          onPress: async () => {
-            try {
-              const res = await fetch(apiUrl(`/api/recordings/${safeId}`), { method: 'DELETE' });
-              if (!res.ok) throw new Error(`Delete failed (HTTP ${res.status})`);
-              router.back();
-            } catch (err) {
-              Alert.alert('Error', describeRequestError(err, 'Failed to delete recording'));
-              console.error('[detail] delete failed:', err);
-            }
-          },
-        },
-      ],
-    );
+  async function handleDelete() {
+    const confirmed =
+      Platform.OS === 'web'
+        ? window.confirm(
+            'This will permanently delete the recording and its audio. Are you sure?',
+          )
+        : await new Promise<boolean>((resolve) =>
+            Alert.alert(
+              'delete moment',
+              'This will permanently delete the recording and its audio. Are you sure?',
+              [
+                { text: 'Cancel', style: 'cancel', onPress: () => resolve(false) },
+                { text: 'Delete', style: 'destructive', onPress: () => resolve(true) },
+              ],
+            ),
+          );
+
+    if (!confirmed) return;
+
+    try {
+      const res = await fetch(apiUrl(`/api/recordings/${safeId}`), { method: 'DELETE' });
+      if (!res.ok) throw new Error(`Delete failed (HTTP ${res.status})`);
+      router.back();
+    } catch (err) {
+      if (Platform.OS === 'web') {
+        window.alert(describeRequestError(err, 'Failed to delete recording'));
+      } else {
+        Alert.alert('Error', describeRequestError(err, 'Failed to delete recording'));
+      }
+      console.error('[detail] delete failed:', err);
+    }
   }
 
   // Deduplicated title save — shared by onSubmitEditing and onBlur (CWE fix: race)
@@ -319,12 +328,14 @@ export default function RecordingDetailScreen() {
           }}
         />
 
-        {/* Hero Audio Player with Waveform */}
-        <AudioPlayer
-          url={resolveAudioUrl(recording.audioUrl)}
-          contentType={recording.audioContentType}
-          duration={recording.duration}
-        />
+        {/* Hero Audio Player with Waveform (if audio is stored and not ephemeral live session placeholder) */}
+        {!recording.isLiveSession && recording.audioUrl && (
+          <AudioPlayer
+            url={resolveAudioUrl(recording.audioUrl)}
+            contentType={recording.audioContentType}
+            duration={recording.duration}
+          />
+        )}
 
         {/* Summary Card */}
         {recording.summary ? (

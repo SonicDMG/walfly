@@ -149,6 +149,8 @@ export function useRecordingUpload() {
   const recordingRef = useRef<InstanceType<typeof AudioModule.AudioRecorder> | null>(null);
   const webRecordingRef = useRef<WebRecordingHandle | null>(null);
   const startedAtRef = useRef(0);
+  const chunkStartTimeRef = useRef(0);
+  const nativeChunkTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const startTimestampRef = useRef('');
   const locationPromiseRef = useRef<Promise<LocationSnapshot | null> | null>(null);
   const autoResetTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -176,6 +178,10 @@ export function useRecordingUpload() {
     if (maxDurationTimerRef.current) {
       clearTimeout(maxDurationTimerRef.current);
       maxDurationTimerRef.current = null;
+    }
+    if (nativeChunkTimerRef.current) {
+      clearInterval(nativeChunkTimerRef.current);
+      nativeChunkTimerRef.current = null;
     }
   }, []);
 
@@ -257,6 +263,7 @@ export function useRecordingUpload() {
       startTimestampRef.current = new Date().toISOString();
       const startedAt = Date.now();
       startedAtRef.current = startedAt;
+      chunkStartTimeRef.current = startedAt;
       chunkIndexCounterRef.current = 0;
 
       // Initialize live session on server
@@ -300,10 +307,44 @@ export function useRecordingUpload() {
           },
         });
       } else {
-        const recorder = new AudioModule.AudioRecorder(recordingOptions());
-        await recorder.prepareToRecordAsync();
-        recorder.record();
-        recordingRef.current = recorder;
+        const initialRecorder = new AudioModule.AudioRecorder(recordingOptions());
+        await initialRecorder.prepareToRecordAsync();
+        initialRecorder.record();
+        recordingRef.current = initialRecorder;
+
+        // Rolling segment rotation on native (every 15s)
+        nativeChunkTimerRef.current = setInterval(async () => {
+          if (!activeSessionIdRef.current || !recordingRef.current) return;
+
+          const oldRec = recordingRef.current;
+          const currentIdx = chunkIndexCounterRef.current++;
+          const chunkDurationMs = Date.now() - chunkStartTimeRef.current;
+          const offsetMs = Math.max(0, chunkStartTimeRef.current - startedAtRef.current);
+          chunkStartTimeRef.current = Date.now();
+
+          // Prepare next recorder segment before stopping old
+          try {
+            const nextRec = new AudioModule.AudioRecorder(recordingOptions());
+            await nextRec.prepareToRecordAsync();
+            nextRec.record();
+            recordingRef.current = nextRec;
+
+            await oldRec.stop();
+            const uri = oldRec.uri;
+            if (uri && activeSessionIdRef.current) {
+              chunkUploadQueue.enqueue({
+                recordingId: activeSessionIdRef.current,
+                chunkIndex: currentIdx,
+                offsetMs,
+                duration: chunkDurationMs / 1000,
+                uri,
+                attempts: 0,
+              });
+            }
+          } catch (cycleErr) {
+            console.warn('[Native Chunking] Error rotating chunk segment:', cycleErr);
+          }
+        }, 15000);
       }
       safeSetState('recording');
 
@@ -338,6 +379,10 @@ export function useRecordingUpload() {
       clearTimeout(maxDurationTimerRef.current);
       maxDurationTimerRef.current = null;
     }
+    if (nativeChunkTimerRef.current) {
+      clearInterval(nativeChunkTimerRef.current);
+      nativeChunkTimerRef.current = null;
+    }
 
     try {
       safeSetState('uploading');
@@ -348,20 +393,10 @@ export function useRecordingUpload() {
 
       const formData = new FormData();
       let durationSec: number;
-      let byteSize: number;
 
       if (webHandle) {
-        // Whatever chunks were captured before an interruption are still
-        // included here — see lib/webRecorder.ts.
-        const { blob: recorded, durationMillis } = await webHandle.stop();
+        const { durationMillis } = await webHandle.stop();
         durationSec = Math.max(1, Math.round(durationMillis / 1000));
-        // recorded.type is authoritative: the browser may have ignored the
-        // mimeType we asked for. The server re-sniffs the bytes regardless.
-        const prepared = await prepareWebUpload(recorded);
-        byteSize = prepared.blob.size;
-        assertUploadSize(byteSize, durationSec, await fetchMaxUploadBytes());
-        formData.append('audio', prepared.blob, `recording.${prepared.ext}`);
-        formData.append('audioMimeType', prepared.mime);
       } else if (recording) {
         let stopError: unknown = null;
         try {
@@ -369,7 +404,6 @@ export function useRecordingUpload() {
         } catch (err) {
           stopError = err;
         }
-        const uri = recording.uri;
 
         // Put the iOS session back to playback before anything else can fail.
         await releaseIosRecordSession();
@@ -381,22 +415,27 @@ export function useRecordingUpload() {
             }`,
           );
         }
-        if (!uri) {
-          throw new Error('Recording could not be saved — no audio file was produced. Try recording again.');
-        }
 
+        const uri = recording.uri;
         durationSec = Math.max(
           1,
-          Math.round((recording.currentTime * 1000 || Date.now() - startedAtRef.current) / 1000),
+          Math.round((Date.now() - startedAtRef.current) / 1000),
         );
 
-        // expo-audio produces AAC in an MPEG-4 container on both iOS and Android.
-        const shape = uploadShapeFor('audio/mp4');
-        const fileRef = new ExpoFile(uri);
-        byteSize = fileRef.exists ? fileRef.size : 0;
-        assertUploadSize(byteSize, durationSec, await fetchMaxUploadBytes());
-        formData.append('audio', fileRef, `recording.${shape.ext}`);
-        formData.append('audioMimeType', shape.mime);
+        // Enqueue final native segment
+        if (uri && activeSessionIdRef.current) {
+          const finalIdx = chunkIndexCounterRef.current++;
+          const finalDurationMs = Date.now() - chunkStartTimeRef.current;
+          const offsetMs = Math.max(0, chunkStartTimeRef.current - startedAtRef.current);
+          chunkUploadQueue.enqueue({
+            recordingId: activeSessionIdRef.current,
+            chunkIndex: finalIdx,
+            offsetMs,
+            duration: Math.max(0.1, finalDurationMs / 1000),
+            uri,
+            attempts: 0,
+          });
+        }
       } else {
         return;
       }
@@ -407,7 +446,7 @@ export function useRecordingUpload() {
 
       let targetRecordingId: string;
 
-      if (currentSessionId && isWeb) {
+      if (currentSessionId) {
         // Wait for any in-flight chunks to drain
         safeSetProgress(0.2);
         await chunkUploadQueue.drain();

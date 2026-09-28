@@ -5,6 +5,7 @@
  * Handles background chunk uploads, exponential backoff, and local cleanup.
  */
 
+import { File as ExpoFile } from 'expo-file-system';
 import { apiUrl } from './api';
 
 export interface QueuedChunk {
@@ -61,6 +62,16 @@ class ChunkUploadQueue {
       if (success) {
         this.queue.shift();
         this.onChunkUploadedCallbacks.forEach((cb) => cb(chunk.recordingId, chunk.chunkIndex));
+
+        // Clean up temporary local chunk audio file if present
+        if (chunk.uri) {
+          try {
+            const file = new ExpoFile(chunk.uri);
+            if (file.exists) file.delete();
+          } catch {
+            // Best effort cleanup
+          }
+        }
       } else {
         chunk.attempts += 1;
         if (chunk.attempts > 5) {
@@ -93,11 +104,8 @@ class ChunkUploadQueue {
           : 'webm';
         formData.append('audio', chunk.blob, `chunk-${chunk.chunkIndex}.${ext}`);
       } else if (chunk.uri) {
-        formData.append('audio', {
-          uri: chunk.uri,
-          type: 'audio/mp4',
-          name: `chunk-${chunk.chunkIndex}.mp4`,
-        } as any);
+        const fileRef = new ExpoFile(chunk.uri);
+        formData.append('audio', fileRef, `chunk-${chunk.chunkIndex}.mp4`);
       }
 
       const res = await fetch(apiUrl(`/api/recordings/${encodeURIComponent(chunk.recordingId)}/chunks`), {
@@ -105,7 +113,13 @@ class ChunkUploadQueue {
         body: formData,
       });
 
-      return res.ok;
+      if (!res.ok) {
+        const errorText = await res.text().catch(() => '');
+        console.warn(`[ChunkQueue] Upload failed for chunk ${chunk.chunkIndex} (HTTP ${res.status}): ${errorText.slice(0, 200)}`);
+        return false;
+      }
+
+      return true;
     } catch (err) {
       console.warn(`[ChunkQueue] Network error uploading chunk ${chunk.chunkIndex}:`, err);
       return false;
