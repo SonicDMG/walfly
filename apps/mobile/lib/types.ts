@@ -123,3 +123,16 @@ export interface ApiError {
   error: string;
   code?: string;
 }
+
+export interface MomentCluster {
+  id: string;
+  name: string;
+  description: string;
+  recordingIds: string[];
+}
+
+export interface ClusteredMomentsResponse {
+  lens: string;
+  generatedAt: string;
+  clusters: MomentCluster[];
+}

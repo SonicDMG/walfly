@@ -53,6 +53,13 @@ export function getLlmModel(): string {
   return model;
 }
 
+/**
+ * The model identifier to use for JEV decisions. Defaults to `~typesafe/jev-latest`.
+ */
+export function getJevModel(): string {
+  return process.env.JEV_MODEL?.trim() || '~typesafe/jev-latest';
+}
+
 export function isLlmConfigured(): boolean {
   return Boolean(process.env.LLM_API_KEY && process.env.LLM_MODEL);
 }

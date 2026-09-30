@@ -83,6 +83,8 @@ export {
 export type {
   ApiError,
   ChunkStatus,
+  ClusteredMomentsResponse,
+  MomentCluster,
   PipelineStage,
   ProcessResponse,
   Recording,

@@ -5,7 +5,7 @@
  * The pipeline self-healing ticker is preserved exactly.
  */
 
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import {
   View,
   Text,
@@ -26,11 +26,27 @@ import {
   apiUrl,
   describeRequestError,
   isNonTerminal,
+  type ClusteredMomentsResponse,
+  type MomentCluster,
   type ProcessResponse,
   type RecordingStatus,
   type RecordingSummary,
 } from '../../lib/api';
 import { colors, fonts, fontSizes, spacing, radius } from '../../lib/theme';
+
+type LensType = 'all' | 'dynamic' | 'domain' | 'intent';
+
+interface LensOption {
+  id: LensType;
+  label: string;
+}
+
+const LENS_OPTIONS: LensOption[] = [
+  { id: 'all',     label: 'all' },
+  { id: 'dynamic', label: '✦ smart clusters' },
+  { id: 'domain',  label: 'work & life' },
+  { id: 'intent',  label: 'by intent' },
+];
 
 const MAX_TICKS_PER_ROUND  = 5;
 const MIN_TICK_INTERVAL_MS = 2000;
@@ -40,11 +56,15 @@ const IDLE_RECHECK_MS      = 5000;
 export default function RecordingsScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
-  const [recordings, setRecordings] = useState<RecordingSummary[]>([]);
-  const [query,      setQuery]      = useState('');
-  const [loading,    setLoading]    = useState(true);
-  const [refreshing, setRefreshing] = useState(false);
-  const [error,      setError]      = useState<string | null>(null);
+  const [recordings,     setRecordings]     = useState<RecordingSummary[]>([]);
+  const [query,          setQuery]          = useState('');
+  const [loading,        setLoading]        = useState(true);
+  const [refreshing,     setRefreshing]     = useState(false);
+  const [error,          setError]          = useState<string | null>(null);
+  const [activeLens,     setActiveLens]     = useState<LensType>('all');
+  const [clustering,     setClustering]     = useState(false);
+  const [clusters,       setClusters]       = useState<MomentCluster[]>([]);
+  const [collapsedClusters, setCollapsedClusters] = useState<Record<string, boolean>>({});
   // Incremented each time a search fetch completes — passed to RecordingCard
   // so entrance animations replay without remounting the whole FlatList.
   const [searchEpoch, setSearchEpoch] = useState(0);
@@ -53,6 +73,14 @@ export default function RecordingsScreen() {
   const debounceRef  = useRef<ReturnType<typeof setTimeout> | null>(null);
   const didMountRef  = useRef(false);
   const mountedRef   = useRef(true);
+
+  const recordingsById = useMemo(() => {
+    const map = new Map<string, RecordingSummary>();
+    for (const r of recordings) {
+      map.set(r._id, r);
+    }
+    return map;
+  }, [recordings]);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -127,6 +155,48 @@ export default function RecordingsScreen() {
     }
   }, []);
 
+  const fetchClusters = useCallback(async (lens: LensType, forceRefresh = false) => {
+    if (lens === 'all') {
+      setClusters([]);
+      return;
+    }
+    setClustering(true);
+    try {
+      const res = await fetch(apiUrl(`/api/moments/clusters?lens=${lens}&refresh=${forceRefresh ? 'true' : 'false'}`));
+      if (!res.ok) throw new Error(`Clustering failed (HTTP ${res.status})`);
+      const data = (await res.json()) as ClusteredMomentsResponse;
+      if (mountedRef.current) {
+        setClusters(data.clusters || []);
+      }
+    } catch (err) {
+      console.warn('Failed to load clusters:', err);
+    } finally {
+      if (mountedRef.current) {
+        setClustering(false);
+      }
+    }
+  }, []);
+
+  const handleSelectLens = (lens: LensType) => {
+    setActiveLens(lens);
+    if (lens !== 'all') {
+      void fetchClusters(lens, false);
+    }
+  };
+
+  const handleRegroup = () => {
+    if (activeLens !== 'all') {
+      void fetchClusters(activeLens, true);
+    }
+  };
+
+  const toggleClusterCollapse = (clusterId: string) => {
+    setCollapsedClusters((prev) => ({
+      ...prev,
+      [clusterId]: !prev[clusterId],
+    }));
+  };
+
   useEffect(() => { void fetchRecordings(); }, [fetchRecordings]);
 
   const recordingsRef = useRef<RecordingSummary[]>([]);
@@ -184,7 +254,7 @@ export default function RecordingsScreen() {
         <Text style={styles.headerTitle}>moments</Text>
       </View>
 
-      {/* Search */}
+      {/* Search & Actions */}
       <View style={styles.searchRow}>
         <View style={styles.searchContainer}>
           <Ionicons name="search" size={16} color={colors.fog} style={styles.searchIcon} />
@@ -200,6 +270,46 @@ export default function RecordingsScreen() {
             selectionColor={colors.amber}
           />
         </View>
+        {activeLens !== 'all' && (
+          <Pressable
+            style={styles.regroupBtn}
+            onPress={handleRegroup}
+            accessibilityLabel="Regroup moments with JEV"
+          >
+            {clustering ? (
+              <ActivityIndicator size="small" color={colors.amber} />
+            ) : (
+              <>
+                <Ionicons name="sparkles-outline" size={14} color={colors.amber} />
+                <Text style={styles.regroupBtnText}>regroup</Text>
+              </>
+            )}
+          </Pressable>
+        )}
+      </View>
+
+      {/* Lens Selector */}
+      <View style={styles.lensBar}>
+        <FlatList
+          horizontal
+          showsHorizontalScrollIndicator={false}
+          data={LENS_OPTIONS}
+          keyExtractor={(item) => item.id}
+          contentContainerStyle={styles.lensListContent}
+          renderItem={({ item }) => {
+            const isActive = activeLens === item.id;
+            return (
+              <Pressable
+                style={[styles.lensChip, isActive && styles.lensChipActive]}
+                onPress={() => handleSelectLens(item.id)}
+              >
+                <Text style={[styles.lensChipText, isActive && styles.lensChipTextActive]}>
+                  {item.label}
+                </Text>
+              </Pressable>
+            );
+          }}
+        />
       </View>
 
       {error && (
@@ -209,39 +319,110 @@ export default function RecordingsScreen() {
         </Pressable>
       )}
 
-      <FlatList
-        data={recordings}
-        keyExtractor={(item) => item._id}
-        renderItem={({ item }) => (
-          <RecordingCard
-            recording={item}
-            searchEpoch={searchEpoch}
-            onPress={() => router.push(`/recording/${item._id}`)}
-          />
-        )}
-        refreshControl={
-          <RefreshControl
-            refreshing={refreshing}
-            onRefresh={onRefresh}
-            tintColor={colors.amber}
-          />
-        }
-        ListEmptyComponent={
-          <View style={styles.centered}>
-            <Text style={styles.emptyText}>
-              {query ? 'no results found' : 'no moments yet'}
-            </Text>
-            {!query && (
-              <Text style={styles.emptyHint}>tap record to capture your first</Text>
-            )}
-          </View>
-        }
-        contentContainerStyle={[
-          recordings.length === 0 ? styles.emptyContainer : styles.listContent,
-          Platform.OS !== 'web' && { paddingBottom: insets.bottom },
-        ]}
-        contentInsetAdjustmentBehavior="automatic"
-      />
+      {activeLens !== 'all' && clusters.length > 0 ? (
+        <FlatList
+          data={clusters}
+          keyExtractor={(item) => item.id}
+          refreshControl={
+            <RefreshControl
+              refreshing={refreshing || clustering}
+              onRefresh={async () => {
+                await onRefresh();
+                await fetchClusters(activeLens, true);
+              }}
+              tintColor={colors.amber}
+            />
+          }
+          renderItem={({ item: cluster }) => {
+            const isCollapsed = Boolean(collapsedClusters[cluster.id]);
+            const clusterRecordings = cluster.recordingIds
+              .map((id) => recordingsById.get(id))
+              .filter((r): r is RecordingSummary => Boolean(r));
+
+            return (
+              <View style={styles.clusterSection}>
+                <Pressable
+                  style={styles.clusterHeader}
+                  onPress={() => toggleClusterCollapse(cluster.id)}
+                >
+                  <View style={styles.clusterTitleRow}>
+                    <Ionicons
+                      name={isCollapsed ? 'chevron-forward' : 'chevron-down'}
+                      size={16}
+                      color={colors.amber}
+                    />
+                    <Text style={styles.clusterTitle}>{cluster.name}</Text>
+                    <View style={styles.clusterBadge}>
+                      <Text style={styles.clusterBadgeText}>{clusterRecordings.length}</Text>
+                    </View>
+                  </View>
+                  {cluster.description ? (
+                    <Text style={styles.clusterDescription} numberOfLines={1}>
+                      {cluster.description}
+                    </Text>
+                  ) : null}
+                </Pressable>
+
+                {!isCollapsed && (
+                  <View style={styles.clusterItems}>
+                    {clusterRecordings.length === 0 ? (
+                      <Text style={styles.clusterEmptyText}>no moments in this cluster</Text>
+                    ) : (
+                      clusterRecordings.map((rec) => (
+                        <RecordingCard
+                          key={rec._id}
+                          recording={rec}
+                          searchEpoch={searchEpoch}
+                          onPress={() => router.push(`/recording/${rec._id}`)}
+                        />
+                      ))
+                    )}
+                  </View>
+                )}
+              </View>
+            );
+          }}
+          contentContainerStyle={[
+            styles.listContent,
+            Platform.OS !== 'web' && { paddingBottom: insets.bottom },
+          ]}
+          contentInsetAdjustmentBehavior="automatic"
+        />
+      ) : (
+        <FlatList
+          data={recordings}
+          keyExtractor={(item) => item._id}
+          renderItem={({ item }) => (
+            <RecordingCard
+              recording={item}
+              searchEpoch={searchEpoch}
+              onPress={() => router.push(`/recording/${item._id}`)}
+            />
+          )}
+          refreshControl={
+            <RefreshControl
+              refreshing={refreshing}
+              onRefresh={onRefresh}
+              tintColor={colors.amber}
+            />
+          }
+          ListEmptyComponent={
+            <View style={styles.centered}>
+              <Text style={styles.emptyText}>
+                {query ? 'no results found' : 'no moments yet'}
+              </Text>
+              {!query && (
+                <Text style={styles.emptyHint}>tap record to capture your first</Text>
+              )}
+            </View>
+          }
+          contentContainerStyle={[
+            recordings.length === 0 ? styles.emptyContainer : styles.listContent,
+            Platform.OS !== 'web' && { paddingBottom: insets.bottom },
+          ]}
+          contentInsetAdjustmentBehavior="automatic"
+        />
+      )}
     </View>
   );
 }
@@ -421,10 +602,14 @@ const styles = StyleSheet.create({
   },
 
   searchRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
     paddingHorizontal: spacing.md,
-    paddingBottom: spacing.sm,
+    paddingBottom: spacing.xs,
+    gap: spacing.xs,
   },
   searchContainer: {
+    flex: 1,
     flexDirection: 'row',
     alignItems: 'center',
     backgroundColor: colors.charcoal,
@@ -433,6 +618,101 @@ const styles = StyleSheet.create({
     borderColor: colors.border,
     paddingHorizontal: spacing.md,
     paddingVertical: spacing.xs + 2,
+  },
+  regroupBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    backgroundColor: colors.amber + '18',
+    borderColor: colors.amber + '40',
+    borderWidth: 1,
+    borderRadius: radius.md,
+    paddingHorizontal: spacing.sm,
+    paddingVertical: spacing.xs + 2,
+  },
+  regroupBtnText: {
+    fontFamily: fonts.body,
+    fontSize: fontSizes.xs,
+    color: colors.amber,
+  },
+
+  // Lens bar
+  lensBar: {
+    paddingBottom: spacing.sm,
+  },
+  lensListContent: {
+    paddingHorizontal: spacing.md,
+    gap: spacing.xs,
+  },
+  lensChip: {
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.xxs + 3,
+    borderRadius: radius.full ?? 99,
+    backgroundColor: colors.charcoal,
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  lensChipActive: {
+    backgroundColor: colors.amber + '22',
+    borderColor: colors.amber,
+  },
+  lensChipText: {
+    fontFamily: fonts.body,
+    fontSize: fontSizes.xs,
+    color: colors.mist,
+  },
+  lensChipTextActive: {
+    color: colors.amber,
+    fontFamily: fonts.bold,
+  },
+
+  // Cluster Section
+  clusterSection: {
+    marginBottom: spacing.md,
+  },
+  clusterHeader: {
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.xs,
+    gap: 2,
+  },
+  clusterTitleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.xs,
+  },
+  clusterTitle: {
+    fontFamily: fonts.title,
+    fontSize: fontSizes.md,
+    color: colors.cream,
+  },
+  clusterBadge: {
+    backgroundColor: colors.charcoal,
+    paddingHorizontal: spacing.xs,
+    paddingVertical: 1,
+    borderRadius: radius.full ?? 99,
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  clusterBadgeText: {
+    fontFamily: fonts.bodyMed,
+    fontSize: fontSizes.xs - 2,
+    color: colors.mist,
+  },
+  clusterDescription: {
+    fontFamily: fonts.body,
+    fontSize: fontSizes.xs,
+    color: colors.fog,
+    paddingLeft: spacing.md + 4,
+  },
+  clusterItems: {
+    marginTop: spacing.xxs,
+  },
+  clusterEmptyText: {
+    fontFamily: fonts.body,
+    fontSize: fontSizes.xs,
+    color: colors.fog,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.xs,
   },
   searchIcon: {
     marginRight: spacing.xs,
