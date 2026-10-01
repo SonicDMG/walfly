@@ -23,8 +23,10 @@ import {
   buildVectorizeText,
   clampIndexedString,
   clampTags,
+  clampUtf8Bytes,
   getCollectionCapabilities,
   getRecordingsCollection,
+  ensureRecordingChunksCollection,
 } from '@walfly/db';
 import type { PipelineRecord, PipelineStage, Recording, RecordingStatus } from '@walfly/db';
 
@@ -88,7 +90,6 @@ export async function createLiveSession(input: CreateLiveSessionInput): Promise<
     checkpointSeq: 0,
     totalExpectedChunks: 0,
     receivedChunks: 0,
-    chunks: [],
   };
 
   console.log(`[Astra] creating live session recording ${input.id}`);
@@ -134,39 +135,59 @@ export interface AppendChunkInput {
   deletedAt?: string;
 }
 
-/** Appends or updates a chunk record and deterministic monotonic transcript stitching. */
+/**
+ * Persists a chunk as an independent document in `recording_chunks` collection
+ * (preventing Astra 1,000 array elements & 5,000 document property limits for all-day sessions)
+ * and updates the parent recording's monotonic stitched transcript.
+ */
 export async function recordChunkTranscript(input: AppendChunkInput): Promise<void> {
-  const collection = getRecordingsCollection();
+  const recordingsCollection = getRecordingsCollection();
+  const chunksCollection = await ensureRecordingChunksCollection();
 
-  const doc = await collection.findOne({ _id: input.recordingId });
+  const doc = await recordingsCollection.findOne({ _id: input.recordingId });
   if (!doc) {
     throw new Error(`Recording ${input.recordingId} not found`);
   }
 
-  const existingChunks = (doc.chunks || []).filter((c) => c.chunkIndex !== input.chunkIndex);
-  const newChunk = {
-    chunkIndex: input.chunkIndex,
-    duration: input.duration,
-    offsetMs: input.offsetMs,
-    status: 'transcribed' as const,
-    transcript: input.transcript || '',
-    deletedAt: input.deletedAt || new Date().toISOString(),
-  };
+  const clampedTranscript = clampUtf8Bytes(input.transcript || '');
+  const chunkId = `${input.recordingId}_chunk_${String(input.chunkIndex).padStart(6, '0')}`;
 
-  const allChunks = [...existingChunks, newChunk].sort((a, b) => a.chunkIndex - b.chunkIndex);
+  // 1. Upsert chunk document in recording_chunks collection (omit _id from $set)
+  await chunksCollection.updateOne(
+    { _id: chunkId },
+    {
+      $set: {
+        recordingId: input.recordingId,
+        chunkIndex: input.chunkIndex,
+        duration: input.duration,
+        offsetMs: input.offsetMs,
+        status: 'transcribed' as const,
+        transcript: clampedTranscript,
+        deletedAt: input.deletedAt || new Date().toISOString(),
+        $vectorize: clampedTranscript.slice(0, 1500),
+      },
+    },
+    { upsert: true },
+  );
 
-  // Strictly deterministic stitched transcript
-  const stitchedTranscript = allChunks
+  // 2. Fetch all recorded chunks for this recording and stitch transcript deterministically
+  const chunksCursor = chunksCollection.find(
+    { recordingId: input.recordingId },
+    { sort: { chunkIndex: 1 } },
+  );
+  const allRecordedChunks = await chunksCursor.toArray();
+
+  const stitchedTranscript = allRecordedChunks
     .map((c) => c.transcript)
     .filter(Boolean)
     .join('\n\n');
 
-  await collection.updateOne(
+  // 3. Update parent recording document without storing unbounded chunk arrays
+  await recordingsCollection.updateOne(
     { _id: input.recordingId },
     {
       $set: {
-        chunks: allChunks,
-        receivedChunks: allChunks.length,
+        receivedChunks: allRecordedChunks.length,
         transcript: stitchedTranscript,
       },
     },

@@ -7,7 +7,11 @@
  */
 
 export { getDb } from './client';
-export { getRecordingsCollection } from './collections';
+export {
+  getRecordingsCollection,
+  getRecordingChunksCollection,
+  ensureRecordingChunksCollection,
+} from './collections';
 export { getCollectionCapabilities, resetCollectionCapabilities } from './capabilities';
 export type { CollectionCapabilities } from './capabilities';
 export * from './constants';

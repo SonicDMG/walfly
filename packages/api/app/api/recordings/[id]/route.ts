@@ -11,7 +11,14 @@
  */
 
 import { NextRequest, NextResponse } from 'next/server';
-import { getRecordingsCollection, clampTags, MAX_TAGS, MAX_TAG_CHARS, INDEXED_STRING_MAX_CHARS } from '@walfly/db';
+import {
+  getRecordingsCollection,
+  ensureRecordingChunksCollection,
+  clampTags,
+  MAX_TAGS,
+  MAX_TAG_CHARS,
+  INDEXED_STRING_MAX_CHARS,
+} from '@walfly/db';
 import { deleteAudio } from '@/lib/storage';
 
 export const runtime = 'nodejs';
@@ -156,6 +163,7 @@ export async function DELETE(_req: NextRequest, { params }: RouteParams) {
   const { id } = await params;
   try {
     const collection = getRecordingsCollection();
+    const chunksCollection = await ensureRecordingChunksCollection();
 
     const recording = await collection.findOne({ _id: id });
     if (!recording) {
@@ -168,6 +176,11 @@ export async function DELETE(_req: NextRequest, { params }: RouteParams) {
         console.warn(`[recordings] ${id} audio delete failed (continuing):`, err);
       });
     }
+
+    // Cascade delete: remove all child chunks associated via recordingId foreign key
+    await chunksCollection.deleteMany({ recordingId: id }).catch((err: unknown) => {
+      console.warn(`[recordings] ${id} child chunks deletion warning (continuing):`, err);
+    });
 
     await collection.deleteOne({ _id: id });
 

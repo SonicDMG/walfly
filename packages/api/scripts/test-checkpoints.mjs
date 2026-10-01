@@ -55,4 +55,26 @@ const stitchedUpdated = stitchChunks(chunksWithUpdate);
 assert.ok(stitchedUpdated.includes('Second segment updated.'), 'Duplicate chunk updates overwrite cleanly');
 console.log('✓ Test 3 Passed: Duplicate chunk update idempotency');
 
+// Test 4: Byte-based transcript chunking & clamping
+import { clampUtf8Bytes, splitTranscriptByBytes } from '../../db/src/text.ts';
+
+const smallText = 'Simple transcript under the limit.';
+assert.strictEqual(clampUtf8Bytes(smallText, 100), smallText, 'clampUtf8Bytes preserves text under budget');
+
+// Create multi-byte string (e.g. Japanese + Emojis, 3-4 bytes per char)
+const emojiMultiByte = '🚀✨'.repeat(20); // Each emoji is 4 bytes -> 160 bytes total
+const clampedMultiByte = clampUtf8Bytes(emojiMultiByte, 50);
+const encoder = new TextEncoder();
+assert.ok(encoder.encode(clampedMultiByte).length <= 50, 'clampUtf8Bytes never exceeds target byte budget');
+
+// Split long text by byte boundary cleanly
+const longParagraph = 'Sentence one. Sentence two. Sentence three. Sentence four. Sentence five. '.repeat(50);
+const splitChunks = splitTranscriptByBytes(longParagraph, { maxBytes: 200, overlapBytes: 20 });
+for (const chunk of splitChunks) {
+  const byteLen = encoder.encode(chunk).length;
+  assert.ok(byteLen <= 200, `Each chunk must be <= maxBytes (got ${byteLen})`);
+}
+assert.ok(splitChunks.length > 1, 'Long text should split into multiple byte-bounded chunks');
+console.log('✓ Test 4 Passed: Byte-based splitting and UTF-8 clamping (<8KB Astra constraints)');
+
 console.log('All Checkpoint tests passed successfully!');

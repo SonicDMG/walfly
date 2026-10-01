@@ -23,7 +23,7 @@ config({ path: resolve(__dirname, '../../api/.env.local') });
 // eslint-disable-next-line @typescript-eslint/no-var-requires -- env must load before the client module reads it
 const { getDb } = require('./client') as typeof import('./client');
 const {
-  RECORDINGS_COLLECTION, VECTOR_DIMENSION, VECTOR_MODEL, RERANK_MODEL, INDEXING_DENY,
+  RECORDINGS_COLLECTION, RECORDING_CHUNKS_COLLECTION, VECTOR_DIMENSION, VECTOR_MODEL, RERANK_MODEL, INDEXING_DENY, CHUNKS_INDEXING_DENY,
 } = require('./constants') as typeof import('./constants');
 
 const RECREATE = process.argv.includes('--recreate');
@@ -70,22 +70,42 @@ async function main(): Promise<void> {
 
     console.log(`[seed] Collection "${RECORDINGS_COLLECTION}" already matches the expected definition.`);
     console.log(`[seed]   lexical=${definition?.lexical?.enabled === true} rerank=${definition?.rerank?.enabled === true}`);
-    return;
+  } else {
+    if (found && RECREATE) {
+      console.warn(`[seed] --recreate: dropping "${RECORDINGS_COLLECTION}" and ALL its documents.`);
+      await db.dropCollection(RECORDINGS_COLLECTION);
+    }
+
+    try {
+      await db.createCollection(RECORDINGS_COLLECTION, HYBRID_DEFINITION as any);
+      console.log('[seed] Created with lexical + rerank (hybrid search available).');
+    } catch (err) {
+      console.warn('[seed] Hybrid options rejected by this database (region-limited preview). Retrying without them.');
+      console.warn(`[seed]   reason: ${err instanceof Error ? err.message : String(err)}`);
+      await db.createCollection(RECORDINGS_COLLECTION, BASE_DEFINITION as any);
+      console.log('[seed] Created without lexical/rerank. Search falls back to vector + searchTokens.');
+    }
   }
 
-  if (found && RECREATE) {
-    console.warn(`[seed] --recreate: dropping "${RECORDINGS_COLLECTION}" and ALL its documents.`);
-    await db.dropCollection(RECORDINGS_COLLECTION);
-  }
+  // Ensure recording_chunks collection exists
+  const existingChunks = existing.find((c) => c.name === RECORDING_CHUNKS_COLLECTION);
+  const CHUNKS_DEFINITION = {
+    vector: {
+      dimension: VECTOR_DIMENSION,
+      metric: 'cosine' as const,
+      service: { provider: 'nvidia', modelName: VECTOR_MODEL },
+    },
+    indexing: { deny: [...CHUNKS_INDEXING_DENY] },
+  };
 
-  try {
-    await db.createCollection(RECORDINGS_COLLECTION, HYBRID_DEFINITION as any);
-    console.log('[seed] Created with lexical + rerank (hybrid search available).');
-  } catch (err) {
-    console.warn('[seed] Hybrid options rejected by this database (region-limited preview). Retrying without them.');
-    console.warn(`[seed]   reason: ${err instanceof Error ? err.message : String(err)}`);
-    await db.createCollection(RECORDINGS_COLLECTION, BASE_DEFINITION as any);
-    console.log('[seed] Created without lexical/rerank. Search falls back to vector + searchTokens.');
+  if (!existingChunks || RECREATE) {
+    if (existingChunks && RECREATE) {
+      await db.dropCollection(RECORDING_CHUNKS_COLLECTION);
+    }
+    await db.createCollection(RECORDING_CHUNKS_COLLECTION, CHUNKS_DEFINITION as any);
+    console.log(`[seed] Created "${RECORDING_CHUNKS_COLLECTION}" collection for unbounded chunks.`);
+  } else {
+    console.log(`[seed] Collection "${RECORDING_CHUNKS_COLLECTION}" already matches the expected definition.`);
   }
 }
 

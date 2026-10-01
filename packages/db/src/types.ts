@@ -15,13 +15,16 @@ export interface RecordingLocation {
 export type ChunkStatus = 'uploading' | 'uploaded' | 'transcribing' | 'transcribed' | 'failed';
 
 export interface RecordingChunk {
+  _id: string;                    // Document ID: `${recordingId}_chunk_${chunkIndex}`
+  recordingId: string;            // Foreign key to parent Recording._id
   chunkIndex: number;
   duration: number;               // seconds
   offsetMs: number;               // offset from start of recording in ms
   status: ChunkStatus;
-  transcript?: string | null;
+  transcript?: string | null;     // clamped to <= MAX_CHUNK_TRANSCRIPT_BYTES (7500 bytes)
   deletedAt?: string | null;      // ISO 8601 string when ephemeral audio was deleted
   audioUrl?: string | null;
+  $vectorize?: string;            // Bounded text for chunk-level semantic search
 }
 
 /** Pipeline states. `uploaded`/`transcribing`/`enriching`/`recording` are non-terminal. */
