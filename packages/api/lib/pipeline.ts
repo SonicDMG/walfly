@@ -183,6 +183,9 @@ function isRetryable(err: unknown): boolean {
   if (err instanceof TranscriptionError) return err.retryable;
   if (!(err instanceof Error)) return false;
 
+  // LLM returned malformed JSON — model misfire, worth retrying.
+  if (err.message.includes('LLM enrichment returned unparseable JSON')) return true;
+
   // AbortSignal.timeout, undici socket errors, and the Astra driver's own
   // timeout/http wrappers all surface as one of these.
   if (err.name === 'TimeoutError' || err.name === 'AbortError' || err.name === 'TypeError') return true;

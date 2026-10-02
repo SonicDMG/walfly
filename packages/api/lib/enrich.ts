@@ -135,7 +135,15 @@ function parseJsonObject(raw: string): Record<string, unknown> {
 
   try {
     const parsed = JSON.parse(candidate) as unknown;
-    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    // Some models wrap the response in an array: [{...}] → unwrap element 0.
+    if (Array.isArray(parsed)) {
+      const first = parsed[0];
+      if (first && typeof first === 'object' && !Array.isArray(first)) {
+        return first as Record<string, unknown>;
+      }
+      throw new Error('not a JSON object');
+    }
+    if (!parsed || typeof parsed !== 'object') {
       throw new Error('not a JSON object');
     }
     return parsed as Record<string, unknown>;
