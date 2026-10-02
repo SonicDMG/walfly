@@ -39,8 +39,8 @@ export interface WebRecordingHandle {
 export async function startWebRecording(options: {
   mimeTypes: readonly string[];
   audioBitsPerSecond?: number;
-  onChunk?: (chunkBlob: Blob, durationMillis: number) => void;
   chunkIntervalMs?: number;
+  onChunk?: (chunkBlob: Blob, durationMillis: number) => void;
 }): Promise<WebRecordingHandle> {
   const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
 
@@ -56,10 +56,11 @@ export async function startWebRecording(options: {
   let currentChunkBlobs: Blob[] = [];
   let chunkStartTime = startedAt;
   let isStopped = false;
-  let settle: ((result: WebRecordingResult) => void) | null = null;
-  let chunkTimer: ReturnType<typeof setInterval> | null = null;
 
-  const createSegmentRecorder = () => {
+  // Each segment recorder writes into its own dedicated blob array so that the
+  // final `dataavailable` fired by stop() (which carries the container footer)
+  // lands in the correct bucket even after currentChunkBlobs has been swapped.
+  const createSegmentRecorder = (targetBlobs: Blob[]) => {
     const rec = new MediaRecorder(stream, {
       ...(mimeType ? { mimeType } : {}),
       ...(options.audioBitsPerSecond ? { audioBitsPerSecond: options.audioBitsPerSecond } : {}),
@@ -67,7 +68,7 @@ export async function startWebRecording(options: {
 
     rec.addEventListener('dataavailable', (event: BlobEvent) => {
       if (event.data.size > 0) {
-        currentChunkBlobs.push(event.data);
+        targetBlobs.push(event.data);
         allRecordedChunks.push(event.data);
       }
     });
@@ -75,22 +76,24 @@ export async function startWebRecording(options: {
     return rec;
   };
 
-  currentRecorder = createSegmentRecorder();
+  currentChunkBlobs = [];
+  currentRecorder = createSegmentRecorder(currentChunkBlobs);
 
   const cycleChunk = () => {
     if (isStopped || !currentRecorder) return;
 
     const oldRecorder = currentRecorder;
-    const oldBlobs = currentChunkBlobs;
+    const oldBlobs = currentChunkBlobs;   // captured before swap
     const chunkDuration = Date.now() - chunkStartTime;
 
-    // Start next segment with a fresh standalone MediaRecorder instance
+    // Start next segment — new array passed to the listener closure so the
+    // old recorder's final dataavailable still lands in oldBlobs.
     currentChunkBlobs = [];
     chunkStartTime = Date.now();
-    currentRecorder = createSegmentRecorder();
+    currentRecorder = createSegmentRecorder(currentChunkBlobs);
     currentRecorder.start();
 
-    // Stop old segment — when stop fires, emit complete standalone container
+    // Stop old segment — when stop fires, oldBlobs is complete (header + data + footer).
     oldRecorder.addEventListener('stop', () => {
       if (oldBlobs.length > 0 && options.onChunk) {
         const sliceBlob = new Blob(oldBlobs, { type: oldRecorder.mimeType || mimeType || 'audio/webm' });
@@ -107,11 +110,13 @@ export async function startWebRecording(options: {
 
   const releaseStream = () => stream.getTracks().forEach((track) => track.stop());
 
-  currentRecorder.start();
+  currentRecorder.start(DEFAULT_TIMESLICE_MS);
 
+  // Time-driven chunk cycling: rotate every chunkIntervalMs when onChunk is requested
+  let chunkTimer: ReturnType<typeof setInterval> | null = null;
   if (options.chunkIntervalMs && options.onChunk) {
     chunkTimer = setInterval(() => {
-      cycleChunk();
+      if (!isStopped) cycleChunk();
     }, options.chunkIntervalMs);
   }
 

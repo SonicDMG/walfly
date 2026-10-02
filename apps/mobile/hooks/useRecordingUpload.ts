@@ -42,7 +42,6 @@ import {
   IOSOutputFormat,
   type RecordingOptions,
 } from 'expo-audio';
-import { File as ExpoFile } from 'expo-file-system';
 import {
   apiUrl,
   describeRequestError,
@@ -314,7 +313,7 @@ export function useRecordingUpload() {
         initialRecorder.record();
         recordingRef.current = initialRecorder;
 
-        // Rolling segment rotation on native (every 15s)
+        // Rolling segment rotation on native: emit a chunk every 15 seconds.
         nativeChunkStoppedRef.current = false;
         nativeChunkTimerRef.current = setInterval(async () => {
           if (nativeChunkStoppedRef.current) return;

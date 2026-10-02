@@ -25,8 +25,9 @@ import {
   clampTags,
   clampUtf8Bytes,
   getCollectionCapabilities,
-  getRecordingsCollection,
-  ensureRecordingChunksCollection,
+  getRecordingsV2Collection,
+  ensureRecordingChunksV2Collection,
+  getRecordingChunksV2Collection,
 } from '@walfly/db';
 import type { PipelineRecord, PipelineStage, Recording, RecordingStatus } from '@walfly/db';
 
@@ -55,7 +56,7 @@ export interface CreateLiveSessionInput {
 
 /** Initializes a live streaming recording session with checkpoint tracking. */
 export async function createLiveSession(input: CreateLiveSessionInput): Promise<void> {
-  const collection = getRecordingsCollection();
+  const collection = getRecordingsV2Collection();
 
   const hasCoords = typeof input.lat === 'number' && typeof input.lng === 'number';
   const location: Recording['location'] = {
@@ -103,7 +104,7 @@ export async function finalizeLiveSession(
   totalExpectedChunks?: number,
   duration?: number,
 ): Promise<void> {
-  const collection = getRecordingsCollection();
+  const collection = getRecordingsV2Collection();
   console.log(`[Astra] finalizing live session ${id}`);
 
   const $set: Record<string, any> = {
@@ -141,8 +142,8 @@ export interface AppendChunkInput {
  * and updates the parent recording's monotonic stitched transcript.
  */
 export async function recordChunkTranscript(input: AppendChunkInput): Promise<void> {
-  const recordingsCollection = getRecordingsCollection();
-  const chunksCollection = await ensureRecordingChunksCollection();
+  const recordingsCollection = getRecordingsV2Collection();
+  const chunksCollection = await ensureRecordingChunksV2Collection();
 
   const doc = await recordingsCollection.findOne({ _id: input.recordingId });
   if (!doc) {
@@ -152,7 +153,7 @@ export async function recordChunkTranscript(input: AppendChunkInput): Promise<vo
   const clampedTranscript = clampUtf8Bytes(input.transcript || '');
   const chunkId = `${input.recordingId}_chunk_${String(input.chunkIndex).padStart(6, '0')}`;
 
-  // 1. Upsert chunk document in recording_chunks collection (omit _id from $set)
+  // 1. Upsert chunk document in recording_chunks_v2 (no $vectorize — pure write-ahead log)
   await chunksCollection.updateOne(
     { _id: chunkId },
     {
@@ -164,13 +165,12 @@ export async function recordChunkTranscript(input: AppendChunkInput): Promise<vo
         status: 'transcribed' as const,
         transcript: clampedTranscript,
         deletedAt: input.deletedAt || new Date().toISOString(),
-        $vectorize: clampedTranscript.slice(0, 1500),
       },
     },
     { upsert: true },
   );
 
-  // 2. Fetch all recorded chunks for this recording and stitch transcript deterministically
+  // 2. Fetch all recorded chunks from recording_chunks_v2 and stitch transcript deterministically
   const chunksCursor = chunksCollection.find(
     { recordingId: input.recordingId },
     { sort: { chunkIndex: 1 } },
@@ -196,7 +196,7 @@ export async function recordChunkTranscript(input: AppendChunkInput): Promise<vo
 
 /** Inserts the initial document. The client kicks /process to advance it. */
 export async function createRecording(input: CreateRecordingInput): Promise<void> {
-  const collection = getRecordingsCollection();
+  const collection = getRecordingsV2Collection();
 
   const hasCoords = typeof input.lat === 'number' && typeof input.lng === 'number';
   // Always an object, never null: PATCH writes $set['location.placeName'], and a
@@ -238,7 +238,7 @@ export async function createRecording(input: CreateRecordingInput): Promise<void
 
 /** The subset of fields one pipeline tick needs. Long fields stay unprojected. */
 export async function getPipelineRecord(id: string): Promise<PipelineRecord | null> {
-  const collection = getRecordingsCollection();
+  const collection = getRecordingsV2Collection();
 
   console.log(`[Astra] fetching pipeline record ${id}`);
   const doc = await collection.findOne(
@@ -289,7 +289,7 @@ export async function acquireLease(
   expectedStatus: RecordingStatus,
   leaseMs: number,
 ): Promise<boolean> {
-  const collection = getRecordingsCollection();
+  const collection = getRecordingsV2Collection();
   const now = Date.now();
 
   console.log(`[Astra] acquiring lease for ${id} (status=${expectedStatus}, duration=${leaseMs}ms)`);
@@ -305,13 +305,13 @@ export async function acquireLease(
 
 /** Frees the lease so the next tick can pick the job up immediately. */
 export async function releaseLease(id: string): Promise<void> {
-  const collection = getRecordingsCollection();
+  const collection = getRecordingsV2Collection();
   await collection.updateOne({ _id: id }, { $set: { leaseUntil: 0 } });
 }
 
 /** uploaded → transcribing. Persists the task id before any polling happens. */
 export async function storeDoclingTaskId(id: string, taskId: string): Promise<void> {
-  const collection = getRecordingsCollection();
+  const collection = getRecordingsV2Collection();
 
   const result = await collection.updateOne(
     { _id: id },
@@ -337,7 +337,7 @@ export async function storeDoclingTaskId(id: string, taskId: string): Promise<vo
  * throw on a missed match rather than a silent no-op.
  */
 export async function storeTranscript(id: string, transcript: string): Promise<void> {
-  const collection = getRecordingsCollection();
+  const collection = getRecordingsV2Collection();
 
   console.log(`[Astra] storing transcript for ${id} (${transcript.length} chars) → status=enriching`);
   const result = await collection.updateOne(
@@ -357,7 +357,7 @@ export async function storeEnrichment(
   transcript: string,
   enrichment: EnrichResult,
 ): Promise<void> {
-  const collection = getRecordingsCollection();
+  const collection = getRecordingsV2Collection();
   console.log(`[Astra] fetching collection capabilities for ${id}`);
   const capabilities = await getCollectionCapabilities();
   console.log(`[Astra] capabilities: lexical=${capabilities.lexical} rerank=${capabilities.rerank} known=${capabilities.known}`);
@@ -444,7 +444,7 @@ export async function recordTransientFailure(
   stage: PipelineStage,
   message: string,
 ): Promise<void> {
-  const collection = getRecordingsCollection();
+  const collection = getRecordingsV2Collection();
 
   console.log(`[Astra] recording transient failure for ${id} at stage=${stage}`);
   await collection.updateOne(
@@ -462,7 +462,7 @@ export async function storeFailure(
   stage: PipelineStage,
   message: string,
 ): Promise<void> {
-  const collection = getRecordingsCollection();
+  const collection = getRecordingsV2Collection();
 
   console.log(`[Astra] recording terminal failure for ${id} at stage=${stage}: ${message.slice(0, 200)}`);
   await collection.updateOne(

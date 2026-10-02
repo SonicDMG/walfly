@@ -12,8 +12,8 @@
 
 import { NextRequest, NextResponse } from 'next/server';
 import {
-  getRecordingsCollection,
-  ensureRecordingChunksCollection,
+  getRecordingsV2Collection,
+  ensureRecordingChunksV2Collection,
   clampTags,
   MAX_TAGS,
   MAX_TAG_CHARS,
@@ -33,7 +33,7 @@ export async function GET(_req: NextRequest, { params }: RouteParams) {
   const { id } = await params;
 
   try {
-    const recording = await getRecordingsCollection().findOne({ _id: id });
+    const recording = await getRecordingsV2Collection().findOne({ _id: id });
     if (!recording) {
       return NextResponse.json({ error: 'Recording not found' }, { status: 404 });
     }
@@ -132,7 +132,7 @@ export async function PATCH(req: NextRequest, { params }: RouteParams) {
   try {
     // Inside the try: the accessor performs the Astra env check, and an uncaught
     // throw would answer with an empty-bodied 500.
-    const collection = getRecordingsCollection();
+    const collection = getRecordingsV2Collection();
 
     const result = await collection.updateOne({ _id: id }, { $set });
     if (result.matchedCount === 0) {
@@ -162,8 +162,8 @@ export async function PATCH(req: NextRequest, { params }: RouteParams) {
 export async function DELETE(_req: NextRequest, { params }: RouteParams) {
   const { id } = await params;
   try {
-    const collection = getRecordingsCollection();
-    const chunksCollection = await ensureRecordingChunksCollection();
+    const collection = getRecordingsV2Collection();
+    const chunksCollection = await ensureRecordingChunksV2Collection();
 
     const recording = await collection.findOne({ _id: id });
     if (!recording) {
