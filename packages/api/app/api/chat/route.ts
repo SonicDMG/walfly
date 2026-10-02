@@ -16,7 +16,7 @@
  */
 
 import { NextRequest, NextResponse } from 'next/server';
-import { clampVectorizeText, getRecordingsCollection } from '@walfly/db';
+import { clampVectorizeText, getRecordingsV2Collection } from '@walfly/db';
 import type { Recording } from '@walfly/db';
 import { getLlmModel, llmClient } from '@/lib/llm';
 
@@ -144,7 +144,7 @@ Format your responses for a mobile app chat interface:
 
 /** Builds the grounded system prompt, or a truthful ungrounded one. */
 async function buildSystemPrompt(question: string, recordingId?: string): Promise<string> {
-  const collection = getRecordingsCollection();
+  const collection = getRecordingsV2Collection();
 
   if (recordingId) {
     console.log(`[Astra] fetching recording ${recordingId} for single-recording context`);

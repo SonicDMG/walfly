@@ -22,7 +22,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import {
   clampVectorizeText,
   getCollectionCapabilities,
-  getRecordingsCollection,
+  getRecordingsV2Collection,
   tokenizeQuery,
 } from '@walfly/db';
 import type { Recording, RecordingSummary } from '@walfly/db';
@@ -74,10 +74,10 @@ export async function GET(req: NextRequest) {
   const limit = Number.isFinite(rawLimit) && rawLimit > 0 ? Math.min(rawLimit, MAX_LIMIT) : DEFAULT_LIMIT;
 
   try {
-    // Inside the try: getRecordingsCollection() performs the env check, and an
+    // Inside the try: getRecordingsV2Collection() performs the env check, and an
     // uncaught throw here would be an empty-bodied 500 on the single most
     // common setup mistake.
-    const collection = getRecordingsCollection();
+    const collection = getRecordingsV2Collection();
 
     if (!q) {
       console.log(`[Astra] listing all recordings (limit=${limit})`);
@@ -128,7 +128,7 @@ export async function GET(req: NextRequest) {
  * every Astra region because it uses only universally supported operators.
  */
 async function portableSearch(
-  collection: ReturnType<typeof getRecordingsCollection>,
+  collection: ReturnType<typeof getRecordingsV2Collection>,
   q: string,
   vectorQuery: string,
   limit: number,
