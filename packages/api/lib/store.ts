@@ -24,9 +24,12 @@ import {
   clampIndexedString,
   clampTags,
   clampUtf8Bytes,
+  clampVectorizeText,
   getCollectionCapabilities,
   getRecordingsCollection,
   ensureRecordingChunksCollection,
+  splitTranscriptByBytes,
+  MAX_CHUNK_TRANSCRIPT_BYTES,
 } from '@walfly/db';
 import type { PipelineRecord, PipelineStage, Recording, RecordingStatus } from '@walfly/db';
 
@@ -164,7 +167,7 @@ export async function recordChunkTranscript(input: AppendChunkInput): Promise<vo
         status: 'transcribed' as const,
         transcript: clampedTranscript,
         deletedAt: input.deletedAt || new Date().toISOString(),
-        $vectorize: clampedTranscript.slice(0, 1500),
+        $vectorize: clampVectorizeText(clampedTranscript),
       },
     },
     { upsert: true },
@@ -349,6 +352,34 @@ export async function storeTranscript(id: string, transcript: string): Promise<v
     throw new Error(`Recording ${id} not found while storing its transcript`);
   }
   console.log(`[Astra] ${id} transcript stored`);
+
+  // Clear any existing/temporary chunks and write optimized, byte-bounded chunks of up to 7,500 bytes (8KB limits)
+  try {
+    const chunksCollection = await ensureRecordingChunksCollection();
+    await chunksCollection.deleteMany({ recordingId: id });
+
+    const splitChunks = splitTranscriptByBytes(transcript, { maxBytes: MAX_CHUNK_TRANSCRIPT_BYTES });
+    if (splitChunks.length > 0) {
+      console.log(`[Astra] splitting transcript into ${splitChunks.length} optimized byte-bounded chunks`);
+      const chunkDocs = splitChunks.map((chunkText, index) => {
+        const chunkId = `${id}_chunk_${String(index).padStart(6, '0')}`;
+        return {
+          _id: chunkId,
+          recordingId: id,
+          chunkIndex: index,
+          duration: 0,
+          offsetMs: 0,
+          status: 'transcribed' as const,
+          transcript: chunkText,
+          deletedAt: new Date().toISOString(),
+          $vectorize: clampVectorizeText(chunkText),
+        };
+      });
+      await chunksCollection.insertMany(chunkDocs);
+    }
+  } catch (err: unknown) {
+    console.warn(`[Astra] warning while saving byte-bounded chunks (continuing):`, err);
+  }
 }
 
 /** enriching → ready. Writes the bounded embedding text and the search fields. */

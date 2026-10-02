@@ -11,6 +11,9 @@ export {
   getRecordingsCollection,
   getRecordingChunksCollection,
   ensureRecordingChunksCollection,
+  getRecordingsV2Collection,
+  getRecordingChunksV2Collection,
+  ensureRecordingChunksV2Collection,
 } from './collections';
 export { getCollectionCapabilities, resetCollectionCapabilities } from './capabilities';
 export type { CollectionCapabilities } from './capabilities';

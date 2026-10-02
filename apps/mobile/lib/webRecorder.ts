@@ -40,7 +40,8 @@ export async function startWebRecording(options: {
   mimeTypes: readonly string[];
   audioBitsPerSecond?: number;
   onChunk?: (chunkBlob: Blob, durationMillis: number) => void;
-  chunkIntervalMs?: number;
+  /** Cycle a new segment whenever accumulated chunk bytes reach this threshold. */
+  chunkMaxBytes?: number;
 }): Promise<WebRecordingHandle> {
   const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
 
@@ -54,10 +55,9 @@ export async function startWebRecording(options: {
   const startedAt = Date.now();
   let currentRecorder: MediaRecorder | null = null;
   let currentChunkBlobs: Blob[] = [];
+  let currentChunkBytes = 0;
   let chunkStartTime = startedAt;
   let isStopped = false;
-  let settle: ((result: WebRecordingResult) => void) | null = null;
-  let chunkTimer: ReturnType<typeof setInterval> | null = null;
 
   const createSegmentRecorder = () => {
     const rec = new MediaRecorder(stream, {
@@ -68,7 +68,12 @@ export async function startWebRecording(options: {
     rec.addEventListener('dataavailable', (event: BlobEvent) => {
       if (event.data.size > 0) {
         currentChunkBlobs.push(event.data);
+        currentChunkBytes += event.data.size;
         allRecordedChunks.push(event.data);
+        // Cycle to a new segment once accumulated bytes exceed the threshold
+        if (options.chunkMaxBytes && currentChunkBytes >= options.chunkMaxBytes && !isStopped) {
+          cycleChunk();
+        }
       }
     });
 
@@ -86,6 +91,7 @@ export async function startWebRecording(options: {
 
     // Start next segment with a fresh standalone MediaRecorder instance
     currentChunkBlobs = [];
+    currentChunkBytes = 0;
     chunkStartTime = Date.now();
     currentRecorder = createSegmentRecorder();
     currentRecorder.start();
@@ -107,22 +113,12 @@ export async function startWebRecording(options: {
 
   const releaseStream = () => stream.getTracks().forEach((track) => track.stop());
 
-  currentRecorder.start();
-
-  if (options.chunkIntervalMs && options.onChunk) {
-    chunkTimer = setInterval(() => {
-      cycleChunk();
-    }, options.chunkIntervalMs);
-  }
+  currentRecorder.start(DEFAULT_TIMESLICE_MS);
 
   return {
     stop() {
       return new Promise<WebRecordingResult>((resolve) => {
         isStopped = true;
-        if (chunkTimer) {
-          clearInterval(chunkTimer);
-          chunkTimer = null;
-        }
 
         const activeRec = currentRecorder;
         const lastBlobs = currentChunkBlobs;
@@ -155,10 +151,6 @@ export async function startWebRecording(options: {
     },
     cancel() {
       isStopped = true;
-      if (chunkTimer) {
-        clearInterval(chunkTimer);
-        chunkTimer = null;
-      }
       releaseStream();
       if (currentRecorder && currentRecorder.state !== 'inactive') {
         try {

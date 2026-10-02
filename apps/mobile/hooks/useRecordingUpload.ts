@@ -288,11 +288,15 @@ export function useRecordingUpload() {
 
       await setAudioModeAsync(RECORD_AUDIO_MODE);
 
+      /** Max audio bytes per uploaded chunk. Mirrors MAX_CHUNK_TRANSCRIPT_BYTES (7,500) so the
+       *  transcribed text of a single chunk stays within Astra DB's 8 KB indexed field limit. */
+      const AUDIO_CHUNK_MAX_BYTES = 7500;
+
       if (Platform.OS === 'web') {
         webRecordingRef.current = await startWebRecording({
           mimeTypes: WEB_MIME_PREFERENCE,
           audioBitsPerSecond: 32000,
-          chunkIntervalMs: 15000,
+          chunkMaxBytes: AUDIO_CHUNK_MAX_BYTES,
           onChunk: (chunkBlob, durationMillis) => {
             if (!activeSessionIdRef.current) return;
             const currentIdx = chunkIndexCounterRef.current++;
@@ -314,12 +318,24 @@ export function useRecordingUpload() {
         initialRecorder.record();
         recordingRef.current = initialRecorder;
 
-        // Rolling segment rotation on native (every 15s)
+        // Rolling segment rotation on native: poll file size and rotate once the
+        // in-progress recording reaches AUDIO_CHUNK_MAX_BYTES.
         nativeChunkStoppedRef.current = false;
         nativeChunkTimerRef.current = setInterval(async () => {
           if (nativeChunkStoppedRef.current) return;
           if (!activeSessionIdRef.current || !recordingRef.current) return;
           if (isRotatingRef.current) return; // skip if previous rotation still in progress
+
+          // Check file size of the in-progress segment before deciding to rotate.
+          const currentUri = recordingRef.current.uri;
+          if (currentUri) {
+            try {
+              const file = new ExpoFile(currentUri);
+              if (file.exists && file.size < AUDIO_CHUNK_MAX_BYTES) return;
+            } catch {
+              // Size check failed — proceed with rotation anyway to avoid unbounded growth.
+            }
+          }
 
           isRotatingRef.current = true;
           const oldRec = recordingRef.current;
@@ -353,7 +369,7 @@ export function useRecordingUpload() {
           } finally {
             isRotatingRef.current = false;
           }
-        }, 15000);
+        }, 500);
       }
       safeSetState('recording');
 
