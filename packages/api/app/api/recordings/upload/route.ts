@@ -24,6 +24,7 @@ import {
   sniffAudioContainer,
   type NormalizedAudio,
 } from '@/lib/docling';
+import { isAstraHibernatingError } from '@walfly/db';
 import { deleteAudio, storageMode, storeAudio } from '@/lib/storage';
 import { createRecording } from '@/lib/store';
 
@@ -160,6 +161,19 @@ export async function POST(req: NextRequest): Promise<NextResponse<UploadRespons
     await deleteAudio(stored.url).catch((cleanupErr: unknown) => {
       console.warn(`[upload] could not remove the orphaned audio at ${stored.url}:`, cleanupErr);
     });
+    if (isAstraHibernatingError(err)) {
+      return NextResponse.json(
+        {
+          error: 'Your database is resuming from hibernation and will be available in a few moments.',
+          hibernating: true,
+          retryAfter: 10,
+        },
+        {
+          status: 503,
+          headers: { 'Retry-After': '10' },
+        },
+      );
+    }
     return NextResponse.json(
       { error: err instanceof Error ? `Database insert failed: ${err.message}` : 'Database insert failed' },
       { status: 500 },

@@ -52,12 +52,48 @@ export function resolveAudioUrl(audioUrl: string): string {
 }
 
 /**
+ * Custom error thrown when Astra DB is actively waking from hibernation.
+ */
+export class DatabaseHibernatingError extends Error {
+  readonly isHibernating = true;
+  readonly retryAfterSeconds: number;
+
+  constructor(message = 'Your database is resuming from hibernation and will be available in a few moments.', retryAfterSeconds = 10) {
+    super(message);
+    this.name = 'DatabaseHibernatingError';
+    this.retryAfterSeconds = retryAfterSeconds;
+  }
+}
+
+/**
+ * Checks whether an error is a DatabaseHibernatingError or carries hibernation indicators.
+ */
+export function isHibernationError(err: unknown): boolean {
+  if (!err) return false;
+  if (err instanceof DatabaseHibernatingError) return true;
+  if ((err as { isHibernating?: boolean }).isHibernating === true) return true;
+  const msg = typeof err === 'string'
+    ? err
+    : (err as { message?: string }).message || String(err);
+  const lower = msg.toLowerCase();
+  return (
+    lower.includes('resuming from hibernation') ||
+    lower.includes('database_hibernated') ||
+    lower.includes('database is hibernated') ||
+    lower.includes('hibernating')
+  );
+}
+
+/**
  * Turns a failed fetch into a message that names the real problem. A bare
  * `TypeError` from fetch means the request never reached the server (wrong
  * host, server down, CORS) — reporting that as "upload failed" is the single
  * most misleading thing this app can say.
  */
 export function describeRequestError(err: unknown, what: string): string {
+  if (isHibernationError(err)) {
+    return 'Database is waking up from sleep. It will be ready in a few moments.';
+  }
   if (err instanceof TypeError) {
     try {
       apiBaseUrl(); // validate it is configured; throws if not

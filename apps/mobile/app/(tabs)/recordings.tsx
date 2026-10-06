@@ -25,6 +25,7 @@ import { WEB_TAB_BAR_HEIGHT } from './_layout';
 import {
   apiUrl,
   describeRequestError,
+  isHibernationError,
   isNonTerminal,
   type ClusteredMomentsResponse,
   type MomentCluster,
@@ -61,6 +62,7 @@ export default function RecordingsScreen() {
   const [loading,        setLoading]        = useState(true);
   const [refreshing,     setRefreshing]     = useState(false);
   const [error,          setError]          = useState<string | null>(null);
+  const [isWakingUp,     setIsWakingUp]     = useState(false);
   const [activeLens,     setActiveLens]     = useState<LensType>('all');
   const [clustering,     setClustering]     = useState(false);
   const [clusters,       setClusters]       = useState<MomentCluster[]>([]);
@@ -136,7 +138,23 @@ export default function RecordingsScreen() {
       const res = await fetch(url);
       if (!res.ok) {
         let detail = '';
-        try { const body = (await res.json()) as { error?: string }; detail = body.error ?? ''; } catch {}
+        let isHibernatingPayload = false;
+        try {
+          const body = (await res.json()) as { error?: string; hibernating?: boolean };
+          detail = body.error ?? '';
+          if (body.hibernating || res.status === 503) {
+            isHibernatingPayload = true;
+          }
+        } catch {}
+
+        if (isHibernatingPayload || isHibernationError(detail)) {
+          if (mountedRef.current && seq === fetchSeqRef.current) {
+            setIsWakingUp(true);
+            setError(null);
+          }
+          return;
+        }
+
         throw new Error(`Could not load recordings (HTTP ${res.status})${detail ? `: ${detail}` : ''}`);
       }
       const data = (await res.json()) as RecordingSummary[];
@@ -144,9 +162,16 @@ export default function RecordingsScreen() {
       setRecordings(data);
       setSearchEpoch((e) => e + 1);
       setError(null);
+      setIsWakingUp(false);
     } catch (err) {
       if (mountedRef.current && seq === fetchSeqRef.current) {
-        setError(describeRequestError(err, 'Could not load recordings'));
+        if (isHibernationError(err)) {
+          setIsWakingUp(true);
+          setError(null);
+        } else {
+          setIsWakingUp(false);
+          setError(describeRequestError(err, 'Could not load recordings'));
+        }
       }
     } finally {
       if (mountedRef.current && seq === fetchSeqRef.current) {
@@ -198,6 +223,15 @@ export default function RecordingsScreen() {
   };
 
   useEffect(() => { void fetchRecordings(); }, [fetchRecordings]);
+
+  // Auto-retry polling when the database is waking up from hibernation
+  useEffect(() => {
+    if (!isWakingUp) return;
+    const interval = setInterval(() => {
+      void fetchRecordings(query);
+    }, 6000);
+    return () => clearInterval(interval);
+  }, [isWakingUp, query, fetchRecordings]);
 
   const recordingsRef = useRef<RecordingSummary[]>([]);
   recordingsRef.current = recordings;
@@ -312,7 +346,19 @@ export default function RecordingsScreen() {
         />
       </View>
 
-      {error && (
+      {isWakingUp && (
+        <View style={styles.wakingUpCard}>
+          <ActivityIndicator size="small" color={colors.amber} />
+          <View style={{ flex: 1 }}>
+            <Text style={styles.wakingUpTitle}>Waking up database...</Text>
+            <Text style={styles.wakingUpSubtitle}>
+              Astra DB is resuming from sleep. Your moments will appear automatically in a few seconds.
+            </Text>
+          </View>
+        </View>
+      )}
+
+      {error && !isWakingUp && (
         <Pressable style={styles.errorRow} onPress={() => void fetchRecordings(query)}>
           <Text style={styles.errorText}>{error}</Text>
           <Text style={styles.errorHint}>tap to retry</Text>
@@ -723,6 +769,32 @@ const styles = StyleSheet.create({
     fontFamily: fonts.body,
     color: colors.cream,
     padding: 0,
+  },
+
+  wakingUpCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
+    backgroundColor: colors.amber + '14',
+    borderWidth: 1,
+    borderColor: colors.amber + '40',
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm,
+    marginHorizontal: spacing.md,
+    borderRadius: radius.md,
+    marginBottom: spacing.xs,
+  },
+  wakingUpTitle: {
+    fontFamily: fonts.bold,
+    color: colors.amber,
+    fontSize: fontSizes.sm,
+    marginBottom: 2,
+  },
+  wakingUpSubtitle: {
+    fontFamily: fonts.body,
+    color: colors.mist,
+    fontSize: fontSizes.xs,
+    lineHeight: 16,
   },
 
   errorRow: {

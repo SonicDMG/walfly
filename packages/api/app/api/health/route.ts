@@ -10,7 +10,7 @@
  */
 
 import { NextResponse } from 'next/server';
-import { getCollectionCapabilities, getDb } from '@walfly/db';
+import { getCollectionCapabilities, getDb, isAstraHibernatingError } from '@walfly/db';
 import { isDoclingConfigured } from '@/lib/docling';
 import { isLlmConfigured } from '@/lib/llm';
 import { storageMode } from '@/lib/storage';
@@ -18,10 +18,10 @@ import { storageMode } from '@/lib/storage';
 export const runtime = 'nodejs';
 
 interface HealthResponse {
-  status: 'ok' | 'degraded';
+  status: 'ok' | 'degraded' | 'hibernating';
   service: 'walfly-api';
   checks: {
-    astra: 'ok' | 'error';
+    astra: 'ok' | 'error' | 'hibernating';
     collection: 'ok' | 'missing' | 'unknown';
     docling: 'configured' | 'missing';
     llm: 'configured' | 'missing';
@@ -32,14 +32,19 @@ interface HealthResponse {
 }
 
 export async function GET() {
-  let astra: 'ok' | 'error' = 'ok';
+  let astra: 'ok' | 'error' | 'hibernating' = 'ok';
   let detail: string | null = null;
 
   try {
     await getDb().listCollections({ nameOnly: true });
   } catch (err) {
-    astra = 'error';
-    detail = err instanceof Error ? err.message : String(err);
+    if (isAstraHibernatingError(err)) {
+      astra = 'hibernating';
+      detail = 'Your database is resuming from hibernation and will be available in a few moments.';
+    } else {
+      astra = 'error';
+      detail = err instanceof Error ? err.message : String(err);
+    }
   }
 
   const capabilities = await getCollectionCapabilities();
@@ -74,20 +79,25 @@ export async function GET() {
 
   const body: HealthResponse = {
     status:
-      astra === 'ok' &&
-      collection === 'ok' &&
-      docling === 'configured' &&
-      llm === 'configured' &&
-      detail === null
-        ? 'ok'
-        : 'degraded',
+      astra === 'hibernating'
+        ? 'hibernating'
+        : astra === 'ok' &&
+          collection === 'ok' &&
+          docling === 'configured' &&
+          llm === 'configured' &&
+          detail === null
+          ? 'ok'
+          : 'degraded',
     service: 'walfly-api',
     checks: { astra, collection, docling, llm, storage },
     hybridSearch: capabilities.lexical && capabilities.rerank,
     detail,
   };
 
-  return NextResponse.json(body);
+  return NextResponse.json(body, {
+    status: astra === 'hibernating' ? 503 : 200,
+    headers: astra === 'hibernating' ? { 'Retry-After': '10' } : undefined,
+  });
 }
 
 export async function OPTIONS(): Promise<Response> {

@@ -15,6 +15,7 @@ import {
   getRecordingsV2Collection,
   ensureRecordingChunksV2Collection,
   clampTags,
+  isAstraHibernatingError,
   MAX_TAGS,
   MAX_TAG_CHARS,
   INDEXED_STRING_MAX_CHARS,
@@ -40,6 +41,19 @@ export async function GET(_req: NextRequest, { params }: RouteParams) {
     return NextResponse.json(recording);
   } catch (err) {
     logDataApiError('get', err);
+    if (isAstraHibernatingError(err)) {
+      return NextResponse.json(
+        {
+          error: 'Your database is resuming from hibernation and will be available in a few moments.',
+          hibernating: true,
+          retryAfter: 10,
+        },
+        {
+          status: 503,
+          headers: { 'Retry-After': '10' },
+        },
+      );
+    }
     return NextResponse.json(
       { error: err instanceof Error ? err.message : 'Failed to load recording' },
       { status: 500 },
@@ -148,6 +162,19 @@ export async function PATCH(req: NextRequest, { params }: RouteParams) {
   } catch (err) {
     const code = dataApiErrorCode(err);
     logDataApiError('patch', err);
+    if (isAstraHibernatingError(err)) {
+      return NextResponse.json(
+        {
+          error: 'Your database is resuming from hibernation and will be available in a few moments.',
+          hibernating: true,
+          retryAfter: 10,
+        },
+        {
+          status: 503,
+          headers: { 'Retry-After': '10' },
+        },
+      );
+    }
     // A rejected document is the caller's problem; anything else is ours.
     const status = code === 'SHRED_DOC_LIMIT_VIOLATION' || code === 'INVALID_VECTORIZE_VALUE_TYPE' ? 400 : 500;
     return NextResponse.json(
@@ -187,6 +214,19 @@ export async function DELETE(_req: NextRequest, { params }: RouteParams) {
     return NextResponse.json({ success: true });
   } catch (err) {
     logDataApiError('delete', err);
+    if (isAstraHibernatingError(err)) {
+      return NextResponse.json(
+        {
+          error: 'Your database is resuming from hibernation and will be available in a few moments.',
+          hibernating: true,
+          retryAfter: 10,
+        },
+        {
+          status: 503,
+          headers: { 'Retry-After': '10' },
+        },
+      );
+    }
     return NextResponse.json(
       { error: err instanceof Error ? err.message : 'Failed to delete recording' },
       { status: 500 },

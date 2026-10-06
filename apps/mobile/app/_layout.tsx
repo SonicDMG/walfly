@@ -3,6 +3,7 @@ import { Stack } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
 import * as SplashScreen from 'expo-splash-screen';
 import { sweepOrphanedChunkFiles } from '../lib/chunkQueue';
+import { apiUrl } from '../lib/api';
 import {
   useFonts,
   PlayfairDisplay_600SemiBold,
@@ -29,6 +30,15 @@ export default function RootLayout() {
     // One-time cleanup of .m4a chunk files left over from sessions before
     // per-chunk cleanup was added.
     sweepOrphanedChunkFiles();
+
+    // Preflight warm-up ping: wake up hibernating Astra DB in background immediately on app launch
+    try {
+      void fetch(apiUrl('/api/health')).catch(() => {
+        // Fire-and-forget; failure is handled on active screen queries
+      });
+    } catch {
+      // Ignore if apiUrl throws due to unconfigured env on startup
+    }
   }, []);
 
   useEffect(() => {

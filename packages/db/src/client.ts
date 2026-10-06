@@ -26,3 +26,22 @@ export function getDb(): Db {
   db = client.db(endpoint, process.env.ASTRA_DB_KEYSPACE ? { keyspace: process.env.ASTRA_DB_KEYSPACE } : undefined);
   return db;
 }
+
+/**
+ * Checks if an error emitted by Astra DB / Data API indicates that the database
+ * is currently resuming from hibernation.
+ */
+export function isAstraHibernatingError(err: unknown): boolean {
+  if (!err) return false;
+  const msg = typeof err === 'string'
+    ? err
+    : (err as { message?: string }).message || String(err);
+
+  const lower = msg.toLowerCase();
+  return (
+    lower.includes('resuming from hibernation') ||
+    lower.includes('database_hibernated') ||
+    lower.includes('database is hibernated') ||
+    lower.includes('hibernating')
+  );
+}

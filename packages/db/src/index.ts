@@ -6,7 +6,7 @@
  * document/state types every server-side set agrees on.
  */
 
-export { getDb } from './client';
+export { getDb, isAstraHibernatingError } from './client';
 export {
   getRecordingsCollection,
   getRecordingChunksCollection,

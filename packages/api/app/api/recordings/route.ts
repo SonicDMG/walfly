@@ -23,6 +23,7 @@ import {
   clampVectorizeText,
   getCollectionCapabilities,
   getRecordingsV2Collection,
+  isAstraHibernatingError,
   tokenizeQuery,
 } from '@walfly/db';
 import type { Recording, RecordingSummary } from '@walfly/db';
@@ -116,6 +117,19 @@ export async function GET(req: NextRequest) {
     return NextResponse.json(await portableSearch(collection, q, vectorQuery, limit));
   } catch (err) {
     logDataApiError('search', err);
+    if (isAstraHibernatingError(err)) {
+      return NextResponse.json(
+        {
+          error: 'Your database is resuming from hibernation and will be available in a few moments.',
+          hibernating: true,
+          retryAfter: 10,
+        },
+        {
+          status: 503,
+          headers: { 'Retry-After': '10' },
+        },
+      );
+    }
     return NextResponse.json(
       { error: err instanceof Error ? err.message : 'Failed to list recordings' },
       { status: 500 },
