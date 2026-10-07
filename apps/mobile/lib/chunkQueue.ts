@@ -16,6 +16,7 @@ export interface QueuedChunk {
   blob?: Blob;
   uri?: string;
   attempts: number;
+  silent?: boolean;
 }
 
 class ChunkUploadQueue {
@@ -103,7 +104,9 @@ class ChunkUploadQueue {
       formData.append('offsetMs', String(chunk.offsetMs));
       formData.append('duration', String(chunk.duration));
 
-      if (chunk.blob) {
+      if (chunk.silent) {
+        formData.append('silent', 'true');
+      } else if (chunk.blob) {
         const ext = chunk.blob.type.includes('wav')
           ? 'wav'
           : chunk.blob.type.includes('ogg')
