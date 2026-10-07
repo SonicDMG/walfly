@@ -67,7 +67,7 @@ export async function startWebRecording(options: {
   let sourceNode: MediaStreamAudioSourceNode | null = null;
   let meterTimer: ReturnType<typeof setInterval> | null = null;
   let windowPeakDb = -Infinity;
-  const SILENCE_DBFS_GATE = -45; // Below -45 dBFS is treated as silence
+  const SILENCE_DBFS_GATE = -32; // Below -32 dBFS is treated as silence
 
   const isBrowser = typeof window !== 'undefined' && typeof navigator !== 'undefined';
   const shouldEnableVAD = options.vadEnabled !== false && isBrowser;

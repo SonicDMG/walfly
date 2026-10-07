@@ -71,8 +71,13 @@ export interface UploadResult {
   id: string;
 }
 
-/** dBFS threshold below which a chunk is treated as silence and skipped. */
-const SILENCE_DB_THRESHOLD = -45;
+/**
+ * dBFS threshold below which a chunk is treated as silence and skipped.
+ * Speech peaks typically sit at -25 dBFS to -10 dBFS, while mobile ambient noise
+ * (mic gain, room acoustics, AC/fans) frequently sits between -38 dBFS and -32 dBFS.
+ * Setting this to -32 dBFS ensures quiet/silent chunks are cleanly gated on mobile devices.
+ */
+const SILENCE_DB_THRESHOLD = -32;
 /** How often (ms) to sample metering from the active recorder within a chunk window. */
 const METERING_POLL_MS = 250;
 
@@ -332,8 +337,9 @@ export function useRecordingUpload() {
           },
         });
       } else {
-        const initialRecorder = new AudioModule.AudioRecorder(recordingOptions());
-        await initialRecorder.prepareToRecordAsync();
+        const opts = recordingOptions();
+        const initialRecorder = new AudioModule.AudioRecorder(opts);
+        await initialRecorder.prepareToRecordAsync(opts);
         initialRecorder.record();
         recordingRef.current = initialRecorder;
 
@@ -345,12 +351,15 @@ export function useRecordingUpload() {
           const rec = recordingRef.current;
           if (!rec) return;
           try {
-            const metering = rec.getStatus().metering;
-            if (metering !== undefined && metering > windowPeakDbRef.current) {
-              windowPeakDbRef.current = metering;
+            const status = rec.getStatus();
+            const metering = status.metering;
+            if (typeof metering === 'number' && !Number.isNaN(metering)) {
+              if (metering > windowPeakDbRef.current) {
+                windowPeakDbRef.current = metering;
+              }
             }
-          } catch {
-            // Ignore transient errors during metering poll.
+          } catch (err) {
+            console.warn('[Native Metering] Poll error:', err);
           }
         }, METERING_POLL_MS);
 
@@ -375,8 +384,9 @@ export function useRecordingUpload() {
 
           // Prepare next recorder segment before stopping old
           try {
-            const nextRec = new AudioModule.AudioRecorder(recordingOptions());
-            await nextRec.prepareToRecordAsync();
+            const nextOpts = recordingOptions();
+            const nextRec = new AudioModule.AudioRecorder(nextOpts);
+            await nextRec.prepareToRecordAsync(nextOpts);
             nextRec.record();
             recordingRef.current = nextRec;
 
@@ -384,7 +394,10 @@ export function useRecordingUpload() {
 
             if (!activeSessionIdRef.current) return;
 
-            if (peakDb < SILENCE_DB_THRESHOLD) {
+            const isSilent = peakDb === -Infinity || peakDb < SILENCE_DB_THRESHOLD;
+            console.log(`[Native Chunking] Chunk ${currentIdx}: peakDb=${peakDb.toFixed(1)} dBFS, silent=${isSilent}`);
+
+            if (isSilent) {
               // Chunk is silent — enqueue a silent marker; skip the audio file.
               chunkUploadQueue.enqueue({
                 recordingId: activeSessionIdRef.current,
@@ -472,13 +485,12 @@ export function useRecordingUpload() {
         durationSec = Math.max(1, Math.round(durationMillis / 1000));
       } else if (recording) {
         // Capture peak dB for the final window before stopping (metering poll has been cleared).
-        let finalPeakDb: number;
+        let finalPeakDb: number = windowPeakDbRef.current;
         try {
           const meteringNow = recording.getStatus().metering;
-          finalPeakDb = Math.max(
-            windowPeakDbRef.current,
-            meteringNow !== undefined ? meteringNow : -Infinity,
-          );
+          if (typeof meteringNow === 'number' && !Number.isNaN(meteringNow)) {
+            finalPeakDb = Math.max(windowPeakDbRef.current, meteringNow);
+          }
         } catch {
           finalPeakDb = windowPeakDbRef.current;
         }
@@ -513,7 +525,10 @@ export function useRecordingUpload() {
           const finalDurationMs = now - chunkStartTimeRef.current;
           const offsetMs = Math.max(0, chunkStartTimeRef.current - startedAtRef.current);
 
-          if (finalPeakDb < SILENCE_DB_THRESHOLD) {
+          const isFinalSilent = finalPeakDb === -Infinity || finalPeakDb < SILENCE_DB_THRESHOLD;
+          console.log(`[Native Chunking] Final Chunk ${finalIdx}: finalPeakDb=${finalPeakDb.toFixed(1)} dBFS, silent=${isFinalSilent}`);
+
+          if (isFinalSilent) {
             chunkUploadQueue.enqueue({
               recordingId: activeSessionIdRef.current,
               chunkIndex: finalIdx,

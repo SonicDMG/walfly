@@ -140,22 +140,60 @@ def _build_timestamped_markdown(document: object) -> str:
 # ---------------------------------------------------------------------------
 
 # RMS amplitude below this threshold (on a 0–1 scale) is treated as silence.
-# Whisper Turbo hallucinates on silent input, so we short-circuit before it runs.
-# The value is conservative: normal speech peaks well above 0.01.
-_SILENCE_RMS_THRESHOLD = 0.01
+# Whisper Turbo hallucinates on silent input (e.g. repeated "the", "I can't do that").
+# 0.025 corresponds to approx -32 dBFS RMS, reliably cutting off ambient background/mic hiss.
+_SILENCE_RMS_THRESHOLD = 0.025
 
 # Minimum number of PCM samples required before we bother computing RMS.
 # Avoids a divide-by-zero on a zero-byte or malformed file.
 _MIN_SAMPLES_FOR_RMS = 64
 
 
-def _is_silent_wav(audio_path: Path) -> bool:
-    """Return True if the WAV file contains only silence.
+def _is_silent_audio(audio_path: Path) -> bool:
+    """Return True if the audio file (WAV, MP4/M4A, WebM, etc.) contains only silence.
 
-    Reads the PCM samples directly without any heavy dependency — we only need
-    the raw amplitude data.  Non-WAV files (mp4, ogg, webm …) return False
-    immediately so they fall through to the Whisper path unchanged.
+    First tries PyAV (`av`) to decode the audio stream and compute RMS amplitude across all formats.
+    Falls back to direct PCM WAV parsing if PyAV is unavailable or fails.
     """
+    try:
+        import av
+        import numpy as np
+
+        with av.open(str(audio_path)) as container:
+            audio_streams = [s for s in container.streams if s.type == "audio"]
+            if not audio_streams:
+                return False
+
+            sum_squares = 0.0
+            total_samples = 0
+
+            for frame in container.decode(audio_streams[0]):
+                # Convert audio frame to float32 numpy array normalized to [-1.0, 1.0]
+                arr = frame.to_ndarray()
+                if arr.dtype == np.int16:
+                    float_arr = arr.astype(np.float32) / 32768.0
+                elif arr.dtype == np.int32:
+                    float_arr = arr.astype(np.float32) / 2147483648.0
+                elif arr.dtype == np.uint8:
+                    float_arr = (arr.astype(np.float32) - 128.0) / 128.0
+                elif np.issubdtype(arr.dtype, np.floating):
+                    float_arr = arr.astype(np.float32)
+                else:
+                    float_arr = arr.astype(np.float32)
+
+                sum_squares += float(np.sum(float_arr ** 2))
+                total_samples += float_arr.size
+
+            if total_samples < _MIN_SAMPLES_FOR_RMS:
+                return False
+
+            rms = (sum_squares / total_samples) ** 0.5
+            log.info("Audio silence check (PyAV): rms=%.5f threshold=%.5f file=%s",
+                     rms, _SILENCE_RMS_THRESHOLD, audio_path.name)
+            return rms < _SILENCE_RMS_THRESHOLD
+    except Exception as pyav_exc:
+        log.debug("PyAV decode failed or uninstalled (%s), attempting raw WAV parser fallback", pyav_exc)
+
     try:
         with audio_path.open("rb") as f:
             header = f.read(44)
@@ -197,10 +235,10 @@ def _is_silent_wav(audio_path: Path) -> bool:
             # 8-bit WAV is unsigned, centre is 128
             rms = (sum((s - 128) ** 2 for s in samples) / len(samples)) ** 0.5 / 128.0
         else:
-            # 24-bit or 32-bit: too uncommon to decode manually; skip silence check
             return False
 
-        log.debug("Silence check: rms=%.5f threshold=%.5f path=%s", rms, _SILENCE_RMS_THRESHOLD, audio_path.name)
+        log.debug("Silence check (raw WAV): rms=%.5f threshold=%.5f path=%s",
+                  rms, _SILENCE_RMS_THRESHOLD, audio_path.name)
         return rms < _SILENCE_RMS_THRESHOLD
 
     except Exception as exc:  # noqa: BLE001
@@ -217,8 +255,8 @@ def _run_transcription(task_id: str, audio_path: Path) -> None:
              task_id, audio_path.name, audio_path.stat().st_size)
 
     # Short-circuit: return an empty transcript rather than let Whisper
-    # hallucinate on a silent WAV chunk.
-    if _is_silent_wav(audio_path):
+    # hallucinate on a silent audio chunk (M4A, WAV, etc.).
+    if _is_silent_audio(audio_path):
         log.info("[%s] Silence detected — skipping Whisper, returning empty transcript", task_id)
         _set_success(task_id, "")
         try:
