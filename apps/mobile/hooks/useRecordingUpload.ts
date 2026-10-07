@@ -71,6 +71,11 @@ export interface UploadResult {
   id: string;
 }
 
+/** dBFS threshold below which a chunk is treated as silence and skipped. */
+const SILENCE_DB_THRESHOLD = -45;
+/** How often (ms) to sample metering from the active recorder within a chunk window. */
+const METERING_POLL_MS = 250;
+
 /** Android's MediaRecorder rejects with E_AUDIO_NODATA if stopped before any frames land. */
 const MIN_RECORDING_MS = 700;
 /** Hard stop, so a forgotten recorder cannot grow an unbounded upload. */
@@ -152,6 +157,8 @@ export function useRecordingUpload() {
   const nativeChunkTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const isRotatingRef = useRef(false);
   const nativeChunkStoppedRef = useRef(false);
+  const windowPeakDbRef = useRef<number>(-Infinity);
+  const meteringPollTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const startTimestampRef = useRef('');
   const locationPromiseRef = useRef<Promise<LocationSnapshot | null> | null>(null);
   const autoResetTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -183,6 +190,10 @@ export function useRecordingUpload() {
     if (nativeChunkTimerRef.current) {
       clearInterval(nativeChunkTimerRef.current);
       nativeChunkTimerRef.current = null;
+    }
+    if (meteringPollTimerRef.current) {
+      clearInterval(meteringPollTimerRef.current);
+      meteringPollTimerRef.current = null;
     }
   }, []);
 
@@ -313,6 +324,23 @@ export function useRecordingUpload() {
         initialRecorder.record();
         recordingRef.current = initialRecorder;
 
+        // Reset peak tracker for the first window.
+        windowPeakDbRef.current = -Infinity;
+
+        // Poll metering at a fine interval to track peak dBFS across the current chunk window.
+        meteringPollTimerRef.current = setInterval(() => {
+          const rec = recordingRef.current;
+          if (!rec) return;
+          try {
+            const metering = rec.getStatus().metering;
+            if (metering !== undefined && metering > windowPeakDbRef.current) {
+              windowPeakDbRef.current = metering;
+            }
+          } catch {
+            // Ignore transient errors during metering poll.
+          }
+        }, METERING_POLL_MS);
+
         // Rolling segment rotation on native: emit a chunk every 15 seconds.
         nativeChunkStoppedRef.current = false;
         nativeChunkTimerRef.current = setInterval(async () => {
@@ -328,6 +356,10 @@ export function useRecordingUpload() {
           const offsetMs = Math.max(0, chunkStartTimeRef.current - startedAtRef.current);
           chunkStartTimeRef.current = now;
 
+          // Snapshot and reset the peak for the next window before any async work.
+          const peakDb = windowPeakDbRef.current;
+          windowPeakDbRef.current = -Infinity;
+
           // Prepare next recorder segment before stopping old
           try {
             const nextRec = new AudioModule.AudioRecorder(recordingOptions());
@@ -336,16 +368,31 @@ export function useRecordingUpload() {
             recordingRef.current = nextRec;
 
             await oldRec.stop();
-            const uri = oldRec.uri;
-            if (uri && activeSessionIdRef.current) {
+
+            if (!activeSessionIdRef.current) return;
+
+            if (peakDb < SILENCE_DB_THRESHOLD) {
+              // Chunk is silent — enqueue a silent marker; skip the audio file.
               chunkUploadQueue.enqueue({
                 recordingId: activeSessionIdRef.current,
                 chunkIndex: currentIdx,
                 offsetMs,
                 duration: chunkDurationMs / 1000,
-                uri,
+                silent: true,
                 attempts: 0,
               });
+            } else {
+              const uri = oldRec.uri;
+              if (uri) {
+                chunkUploadQueue.enqueue({
+                  recordingId: activeSessionIdRef.current,
+                  chunkIndex: currentIdx,
+                  offsetMs,
+                  duration: chunkDurationMs / 1000,
+                  uri,
+                  attempts: 0,
+                });
+              }
             }
           } catch (cycleErr) {
             console.warn('[Native Chunking] Error rotating chunk segment:', cycleErr);
@@ -392,6 +439,10 @@ export function useRecordingUpload() {
       clearInterval(nativeChunkTimerRef.current);
       nativeChunkTimerRef.current = null;
     }
+    if (meteringPollTimerRef.current) {
+      clearInterval(meteringPollTimerRef.current);
+      meteringPollTimerRef.current = null;
+    }
 
     try {
       safeSetState('uploading');
@@ -407,6 +458,18 @@ export function useRecordingUpload() {
         const { durationMillis } = await webHandle.stop();
         durationSec = Math.max(1, Math.round(durationMillis / 1000));
       } else if (recording) {
+        // Capture peak dB for the final window before stopping (metering poll has been cleared).
+        let finalPeakDb: number;
+        try {
+          const meteringNow = recording.getStatus().metering;
+          finalPeakDb = Math.max(
+            windowPeakDbRef.current,
+            meteringNow !== undefined ? meteringNow : -Infinity,
+          );
+        } catch {
+          finalPeakDb = windowPeakDbRef.current;
+        }
+
         let stopError: unknown = null;
         try {
           await recording.stop();
@@ -425,31 +488,45 @@ export function useRecordingUpload() {
           );
         }
 
-        const uri = recording.uri;
-        if (!uri) {
-          console.error('[stopAndUpload] Final native segment has no URI — last audio segment will be missing.', {
-            sessionId: activeSessionIdRef.current,
-          });
-        }
         durationSec = Math.max(
           1,
           Math.round((Date.now() - startedAtRef.current) / 1000),
         );
 
-        // Enqueue final native segment
-        if (uri && activeSessionIdRef.current) {
+        // Enqueue final native segment (or silent marker if below threshold).
+        if (activeSessionIdRef.current) {
           const finalIdx = chunkIndexCounterRef.current++;
           const now = Date.now();
           const finalDurationMs = now - chunkStartTimeRef.current;
           const offsetMs = Math.max(0, chunkStartTimeRef.current - startedAtRef.current);
-          chunkUploadQueue.enqueue({
-            recordingId: activeSessionIdRef.current,
-            chunkIndex: finalIdx,
-            offsetMs,
-            duration: Math.max(0.1, finalDurationMs / 1000),
-            uri,
-            attempts: 0,
-          });
+
+          if (finalPeakDb < SILENCE_DB_THRESHOLD) {
+            chunkUploadQueue.enqueue({
+              recordingId: activeSessionIdRef.current,
+              chunkIndex: finalIdx,
+              offsetMs,
+              duration: Math.max(0.1, finalDurationMs / 1000),
+              silent: true,
+              attempts: 0,
+            });
+          } else {
+            const uri = recording.uri;
+            if (!uri) {
+              console.error('[stopAndUpload] Final native segment has no URI — last audio segment will be missing.', {
+                sessionId: activeSessionIdRef.current,
+              });
+            }
+            if (uri) {
+              chunkUploadQueue.enqueue({
+                recordingId: activeSessionIdRef.current,
+                chunkIndex: finalIdx,
+                offsetMs,
+                duration: Math.max(0.1, finalDurationMs / 1000),
+                uri,
+                attempts: 0,
+              });
+            }
+          }
         }
       } else {
         return;
@@ -595,7 +672,7 @@ const PLAYBACK_AUDIO_MODE = {
  */
 function recordingOptions(): RecordingOptions {
   return {
-    isMeteringEnabled: false,
+    isMeteringEnabled: true,
     extension: '.m4a',
     sampleRate: 22050,
     numberOfChannels: 1,
