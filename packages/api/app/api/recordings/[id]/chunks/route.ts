@@ -12,14 +12,35 @@ export async function POST(
     const { id: recordingId } = await params;
     const formData = await req.formData();
 
-    const audioFile = formData.get('audio') as Blob | null;
-    if (!audioFile) {
-      return NextResponse.json({ error: 'Missing audio file in form data' }, { status: 400 });
-    }
-
     const chunkIndex = parseInt(String(formData.get('chunkIndex') ?? '0'), 10);
     const offsetMs = parseInt(String(formData.get('offsetMs') ?? '0'), 10);
     const duration = parseFloat(String(formData.get('duration') ?? '0'));
+    const silent = formData.get('silent') === 'true';
+
+    const audioFile = formData.get('audio') as Blob | null;
+
+    // When the client detected silence locally (no audio blob sent), skip the
+    // ASR service entirely and just record the gap as a silent chunk.
+    if (!audioFile && silent) {
+      await recordChunkTranscript({
+        recordingId,
+        chunkIndex,
+        duration,
+        offsetMs,
+        transcript: '',
+        deletedAt: new Date().toISOString(),
+        silent: true,
+      });
+
+      return NextResponse.json(
+        { status: 'silent', chunkIndex },
+        { status: 200 },
+      );
+    }
+
+    if (!audioFile) {
+      return NextResponse.json({ error: 'Missing audio file in form data' }, { status: 400 });
+    }
 
     const arrayBuffer = await audioFile.arrayBuffer();
     const bytes = new Uint8Array(arrayBuffer);

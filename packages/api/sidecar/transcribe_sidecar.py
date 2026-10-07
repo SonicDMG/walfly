@@ -134,6 +134,7 @@ def _build_timestamped_markdown(document: object) -> str:
     return document.export_to_markdown()  # type: ignore[union-attr]
 
 
+# TODO: remove after client-side VAD gate confirmed in production
 # ---------------------------------------------------------------------------
 # Silence detection
 # ---------------------------------------------------------------------------

@@ -134,6 +134,7 @@ export interface AppendChunkInput {
   offsetMs: number;
   transcript?: string;
   deletedAt?: string;
+  silent?: boolean;
 }
 
 /**
@@ -165,6 +166,7 @@ export async function recordChunkTranscript(input: AppendChunkInput): Promise<vo
         status: 'transcribed' as const,
         transcript: clampedTranscript,
         deletedAt: input.deletedAt || new Date().toISOString(),
+        silent: input.silent ?? false,
       },
     },
     { upsert: true },

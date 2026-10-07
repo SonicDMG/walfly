@@ -25,6 +25,7 @@ export interface RecordingChunk {
   deletedAt?: string | null;      // ISO 8601 string when ephemeral audio was deleted
   audioUrl?: string | null;
   $vectorize?: string;            // Bounded text for chunk-level semantic search
+  silent?: boolean;               // true when the client flagged the chunk as silence
 }
 
 /** Pipeline states. `uploaded`/`transcribing`/`enriching`/`recording` are non-terminal. */
