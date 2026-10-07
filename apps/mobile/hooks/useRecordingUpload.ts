@@ -317,6 +317,19 @@ export function useRecordingUpload() {
               attempts: 0,
             });
           },
+          onSilentChunk: (durationMillis) => {
+            if (!activeSessionIdRef.current) return;
+            const currentIdx = chunkIndexCounterRef.current++;
+            const offsetMs = Math.max(0, Date.now() - startedAtRef.current - durationMillis);
+            chunkUploadQueue.enqueue({
+              recordingId: activeSessionIdRef.current,
+              chunkIndex: currentIdx,
+              offsetMs,
+              duration: durationMillis / 1000,
+              silent: true,
+              attempts: 0,
+            });
+          },
         });
       } else {
         const initialRecorder = new AudioModule.AudioRecorder(recordingOptions());

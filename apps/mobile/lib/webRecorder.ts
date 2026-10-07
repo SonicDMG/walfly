@@ -41,6 +41,8 @@ export async function startWebRecording(options: {
   audioBitsPerSecond?: number;
   chunkIntervalMs?: number;
   onChunk?: (chunkBlob: Blob, durationMillis: number) => void;
+  vadEnabled?: boolean;
+  onSilentChunk?: (durationMillis: number) => void;
 }): Promise<WebRecordingHandle> {
   const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
 
@@ -56,6 +58,68 @@ export async function startWebRecording(options: {
   let currentChunkBlobs: Blob[] = [];
   let chunkStartTime = startedAt;
   let isStopped = false;
+
+  // Track speech presence in the active chunk window
+  let hadSpeech = false;
+  // Type as any or MicVAD instance to support dynamic/guarded usage
+  let vadInstance: { destroy: () => Promise<void>; pause: () => Promise<void> } | null = null;
+
+  const isBrowser = typeof window !== 'undefined' && typeof navigator !== 'undefined';
+  const shouldEnableVAD = options.vadEnabled !== false && isBrowser;
+
+  if (shouldEnableVAD) {
+    try {
+      // Load onnxruntime first, then vad bundle
+      const win = window as unknown as {
+        ort?: unknown;
+        vad?: { MicVAD?: { new: (opts: unknown) => Promise<unknown> } };
+      };
+
+      const loadScript = (src: string) =>
+        new Promise<void>((resolve, reject) => {
+          const script = document.createElement('script');
+          script.src = src;
+          script.onload = () => resolve();
+          script.onerror = (e) => reject(e);
+          document.head.appendChild(script);
+        });
+
+      if (!win.ort && typeof document !== 'undefined') {
+        await loadScript('/assets/vad/ort.min.js').catch((e) => {
+          console.warn('[WebRecorder] Could not load ORT script dynamically:', e);
+        });
+      }
+
+      let vad = win.vad;
+      if (!vad && typeof document !== 'undefined') {
+        await loadScript('/assets/vad/bundle.min.js').catch((e) => {
+          console.warn('[WebRecorder] Could not load VAD script dynamically:', e);
+        });
+        vad = win.vad;
+      }
+
+      if (vad && vad.MicVAD) {
+        vadInstance = (await vad.MicVAD.new({
+          getStream: async () => stream,
+          pauseStream: async () => {}, // do not kill shared stream on pause
+          resumeStream: async () => stream,
+          startOnLoad: true,
+          baseAssetPath: '/assets/vad/',
+          onnxWASMBasePath: '/assets/vad/',
+          onSpeechStart: () => {
+            hadSpeech = true;
+          },
+        })) as { destroy: () => Promise<void>; pause: () => Promise<void> };
+      }
+    } catch (vadErr) {
+      console.warn('[WebRecorder] VAD initialization failed, falling back to non-VAD recording:', vadErr);
+      vadInstance = null;
+      hadSpeech = true;
+    }
+  } else {
+    // If VAD is disabled, treat every chunk as having speech
+    hadSpeech = true;
+  }
 
   // Each segment recorder writes into its own dedicated blob array so that the
   // final `dataavailable` fired by stop() (which carries the container footer)
@@ -85,6 +149,12 @@ export async function startWebRecording(options: {
     const oldRecorder = currentRecorder;
     const oldBlobs = currentChunkBlobs;   // captured before swap
     const chunkDuration = Date.now() - chunkStartTime;
+    const segmentHadSpeech = vadInstance ? hadSpeech : true;
+
+    // Reset speech flag for next chunk window
+    if (vadInstance) {
+      hadSpeech = false;
+    }
 
     // Start next segment — new array passed to the listener closure so the
     // old recorder's final dataavailable still lands in oldBlobs.
@@ -95,9 +165,13 @@ export async function startWebRecording(options: {
 
     // Stop old segment — when stop fires, oldBlobs is complete (header + data + footer).
     oldRecorder.addEventListener('stop', () => {
-      if (oldBlobs.length > 0 && options.onChunk) {
-        const sliceBlob = new Blob(oldBlobs, { type: oldRecorder.mimeType || mimeType || 'audio/webm' });
-        options.onChunk(sliceBlob, chunkDuration);
+      if (segmentHadSpeech) {
+        if (oldBlobs.length > 0 && options.onChunk) {
+          const sliceBlob = new Blob(oldBlobs, { type: oldRecorder.mimeType || mimeType || 'audio/webm' });
+          options.onChunk(sliceBlob, chunkDuration);
+        }
+      } else {
+        options.onSilentChunk?.(chunkDuration);
       }
     });
 
@@ -129,14 +203,25 @@ export async function startWebRecording(options: {
           chunkTimer = null;
         }
 
+        const segmentHadSpeech = vadInstance ? hadSpeech : (options.vadEnabled !== false && isBrowser ? hadSpeech : true);
+
+        if (vadInstance) {
+          vadInstance.destroy().catch(() => {});
+          vadInstance = null;
+        }
+
         const activeRec = currentRecorder;
         const lastBlobs = currentChunkBlobs;
         const lastDuration = Date.now() - chunkStartTime;
 
         const onFinalStop = () => {
-          if (lastBlobs.length > 0 && options.onChunk) {
-            const sliceBlob = new Blob(lastBlobs, { type: activeRec?.mimeType || mimeType || 'audio/webm' });
-            options.onChunk(sliceBlob, lastDuration);
+          if (segmentHadSpeech) {
+            if (lastBlobs.length > 0 && options.onChunk) {
+              const sliceBlob = new Blob(lastBlobs, { type: activeRec?.mimeType || mimeType || 'audio/webm' });
+              options.onChunk(sliceBlob, lastDuration);
+            }
+          } else {
+            options.onSilentChunk?.(lastDuration);
           }
           releaseStream();
           resolve({
@@ -163,6 +248,10 @@ export async function startWebRecording(options: {
       if (chunkTimer) {
         clearInterval(chunkTimer);
         chunkTimer = null;
+      }
+      if (vadInstance) {
+        vadInstance.destroy().catch(() => {});
+        vadInstance = null;
       }
       releaseStream();
       if (currentRecorder && currentRecorder.state !== 'inactive') {
