@@ -61,63 +61,52 @@ export async function startWebRecording(options: {
 
   // Track speech presence in the active chunk window
   let hadSpeech = false;
-  // Type as any or MicVAD instance to support dynamic/guarded usage
-  let vadInstance: { destroy: () => Promise<void>; pause: () => Promise<void> } | null = null;
+  // Fallback Web Audio API RMS/dB metering for browser silence gating
+  let audioCtx: AudioContext | null = null;
+  let analyser: AnalyserNode | null = null;
+  let sourceNode: MediaStreamAudioSourceNode | null = null;
+  let meterTimer: ReturnType<typeof setInterval> | null = null;
+  let windowPeakDb = -Infinity;
+  const SILENCE_DBFS_GATE = -45; // Below -45 dBFS is treated as silence
 
   const isBrowser = typeof window !== 'undefined' && typeof navigator !== 'undefined';
   const shouldEnableVAD = options.vadEnabled !== false && isBrowser;
 
   if (shouldEnableVAD) {
     try {
-      // Load onnxruntime first, then vad bundle
-      const win = window as unknown as {
-        ort?: unknown;
-        vad?: { MicVAD?: { new: (opts: unknown) => Promise<unknown> } };
-      };
+      const AudioCtxClass = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
+      if (AudioCtxClass) {
+        audioCtx = new AudioCtxClass();
+        analyser = audioCtx.createAnalyser();
+        analyser.fftSize = 512;
+        sourceNode = audioCtx.createMediaStreamSource(stream);
+        sourceNode.connect(analyser);
 
-      const loadScript = (src: string) =>
-        new Promise<void>((resolve, reject) => {
-          const script = document.createElement('script');
-          script.src = src;
-          script.onload = () => resolve();
-          script.onerror = (e) => reject(e);
-          document.head.appendChild(script);
-        });
-
-      if (!win.ort && typeof document !== 'undefined') {
-        await loadScript('/assets/vad/ort.min.js').catch((e) => {
-          console.warn('[WebRecorder] Could not load ORT script dynamically:', e);
-        });
-      }
-
-      let vad = win.vad;
-      if (!vad && typeof document !== 'undefined') {
-        await loadScript('/assets/vad/bundle.min.js').catch((e) => {
-          console.warn('[WebRecorder] Could not load VAD script dynamically:', e);
-        });
-        vad = win.vad;
-      }
-
-      if (vad && vad.MicVAD) {
-        vadInstance = (await vad.MicVAD.new({
-          getStream: async () => stream,
-          pauseStream: async () => {}, // do not kill shared stream on pause
-          resumeStream: async () => stream,
-          startOnLoad: true,
-          baseAssetPath: '/assets/vad/',
-          onnxWASMBasePath: '/assets/vad/',
-          onSpeechStart: () => {
+        const dataArray = new Float32Array(analyser.fftSize);
+        meterTimer = setInterval(() => {
+          if (!analyser) return;
+          analyser.getFloatTimeDomainData(dataArray);
+          let sumSquares = 0;
+          for (let i = 0; i < dataArray.length; i++) {
+            sumSquares += dataArray[i] * dataArray[i];
+          }
+          const rms = Math.sqrt(sumSquares / dataArray.length);
+          const db = rms > 1e-5 ? 20 * Math.log10(rms) : -100;
+          if (db > windowPeakDb) {
+            windowPeakDb = db;
+          }
+          if (db >= SILENCE_DBFS_GATE) {
             hadSpeech = true;
-          },
-        })) as { destroy: () => Promise<void>; pause: () => Promise<void> };
+          }
+        }, 100);
+      } else {
+        hadSpeech = true;
       }
-    } catch (vadErr) {
-      console.warn('[WebRecorder] VAD initialization failed, falling back to non-VAD recording:', vadErr);
-      vadInstance = null;
+    } catch (err) {
+      console.warn('[WebRecorder] AudioContext metering init failed, falling back to speech=true:', err);
       hadSpeech = true;
     }
   } else {
-    // If VAD is disabled, treat every chunk as having speech
     hadSpeech = true;
   }
 
@@ -149,12 +138,11 @@ export async function startWebRecording(options: {
     const oldRecorder = currentRecorder;
     const oldBlobs = currentChunkBlobs;   // captured before swap
     const chunkDuration = Date.now() - chunkStartTime;
-    const segmentHadSpeech = vadInstance ? hadSpeech : true;
+    const segmentHadSpeech = hadSpeech || windowPeakDb >= SILENCE_DBFS_GATE;
 
-    // Reset speech flag for next chunk window
-    if (vadInstance) {
-      hadSpeech = false;
-    }
+    // Reset speech flag and peak dB for next chunk window
+    hadSpeech = false;
+    windowPeakDb = -Infinity;
 
     // Start next segment — new array passed to the listener closure so the
     // old recorder's final dataavailable still lands in oldBlobs.
@@ -203,11 +191,19 @@ export async function startWebRecording(options: {
           chunkTimer = null;
         }
 
-        const segmentHadSpeech = vadInstance ? hadSpeech : (options.vadEnabled !== false && isBrowser ? hadSpeech : true);
+        const segmentHadSpeech = hadSpeech || windowPeakDb >= SILENCE_DBFS_GATE;
 
-        if (vadInstance) {
-          vadInstance.destroy().catch(() => {});
-          vadInstance = null;
+        if (meterTimer) {
+          clearInterval(meterTimer);
+          meterTimer = null;
+        }
+        if (sourceNode) {
+          try { sourceNode.disconnect(); } catch {}
+          sourceNode = null;
+        }
+        if (audioCtx) {
+          try { audioCtx.close(); } catch {}
+          audioCtx = null;
         }
 
         const activeRec = currentRecorder;
@@ -249,9 +245,17 @@ export async function startWebRecording(options: {
         clearInterval(chunkTimer);
         chunkTimer = null;
       }
-      if (vadInstance) {
-        vadInstance.destroy().catch(() => {});
-        vadInstance = null;
+      if (meterTimer) {
+        clearInterval(meterTimer);
+        meterTimer = null;
+      }
+      if (sourceNode) {
+        try { sourceNode.disconnect(); } catch {}
+        sourceNode = null;
+      }
+      if (audioCtx) {
+        try { audioCtx.close(); } catch {}
+        audioCtx = null;
       }
       releaseStream();
       if (currentRecorder && currentRecorder.state !== 'inactive') {
