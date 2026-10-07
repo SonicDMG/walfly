@@ -6,6 +6,14 @@ const workspaceRoot = path.resolve(projectRoot, '../..');
 
 const config = getDefaultConfig(projectRoot);
 
+// Allow Metro to bundle .onnx model files and .wasm binaries (needed for
+// @ricky0123/vad-web and onnxruntime-web assets in apps/mobile/assets/vad/).
+config.resolver.assetExts = [
+  ...(config.resolver.assetExts || []),
+  'onnx',
+  'wasm',
+];
+
 config.watchFolders = [workspaceRoot];
 config.resolver.nodeModulesPaths = [
   path.resolve(projectRoot, 'node_modules'),

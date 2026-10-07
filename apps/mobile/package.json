@@ -15,6 +15,7 @@
     "@expo-google-fonts/playfair-display": "^0.4.2",
     "@expo/metro-runtime": "~57.0.15",
     "@expo/vector-icons": "^15.0.2",
+    "@ricky0123/vad-web": "^0.0.31",
     "expo": "~57.0.9",
     "expo-audio": "~57.0.4",
     "expo-build-properties": "~57.0.16",
