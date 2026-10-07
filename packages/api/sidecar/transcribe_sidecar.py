@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import logging
 import os
+import struct
 import tempfile
 import threading
 import uuid
@@ -134,12 +135,97 @@ def _build_timestamped_markdown(document: object) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Silence detection
+# ---------------------------------------------------------------------------
+
+# RMS amplitude below this threshold (on a 0–1 scale) is treated as silence.
+# Whisper Turbo hallucinates on silent input, so we short-circuit before it runs.
+# The value is conservative: normal speech peaks well above 0.01.
+_SILENCE_RMS_THRESHOLD = 0.01
+
+# Minimum number of PCM samples required before we bother computing RMS.
+# Avoids a divide-by-zero on a zero-byte or malformed file.
+_MIN_SAMPLES_FOR_RMS = 64
+
+
+def _is_silent_wav(audio_path: Path) -> bool:
+    """Return True if the WAV file contains only silence.
+
+    Reads the PCM samples directly without any heavy dependency — we only need
+    the raw amplitude data.  Non-WAV files (mp4, ogg, webm …) return False
+    immediately so they fall through to the Whisper path unchanged.
+    """
+    try:
+        with audio_path.open("rb") as f:
+            header = f.read(44)
+
+        # WAV files start with RIFF…WAVE; reject anything else quickly.
+        if len(header) < 44 or header[:4] != b"RIFF" or header[8:12] != b"WAVE":
+            return False
+
+        # Parse enough of the canonical 44-byte PCM header to find bit depth.
+        bits_per_sample = struct.unpack_from("<H", header, 34)[0]
+        if bits_per_sample not in (8, 16, 24, 32):
+            return False
+
+        # Read the full file and skip to the "data" sub-chunk.
+        data = audio_path.read_bytes()
+        offset = 12  # skip RIFF header
+        data_payload = b""
+        while offset + 8 <= len(data):
+            chunk_id = data[offset:offset + 4]
+            chunk_size = struct.unpack_from("<I", data, offset + 4)[0]
+            if chunk_id == b"data":
+                data_payload = data[offset + 8: offset + 8 + chunk_size]
+                break
+            offset += 8 + chunk_size
+
+        if not data_payload:
+            return False
+
+        if bits_per_sample == 16:
+            fmt = "<" + "h" * (len(data_payload) // 2)
+            if len(data_payload) // 2 < _MIN_SAMPLES_FOR_RMS:
+                return False
+            samples = struct.unpack(fmt, data_payload[: (len(data_payload) // 2) * 2])
+            rms = (sum(s * s for s in samples) / len(samples)) ** 0.5 / 32768.0
+        elif bits_per_sample == 8:
+            samples = list(data_payload)
+            if len(samples) < _MIN_SAMPLES_FOR_RMS:
+                return False
+            # 8-bit WAV is unsigned, centre is 128
+            rms = (sum((s - 128) ** 2 for s in samples) / len(samples)) ** 0.5 / 128.0
+        else:
+            # 24-bit or 32-bit: too uncommon to decode manually; skip silence check
+            return False
+
+        log.debug("Silence check: rms=%.5f threshold=%.5f path=%s", rms, _SILENCE_RMS_THRESHOLD, audio_path.name)
+        return rms < _SILENCE_RMS_THRESHOLD
+
+    except Exception as exc:  # noqa: BLE001
+        log.warning("Silence check failed (%s) — treating as non-silent", exc)
+        return False
+
+
+# ---------------------------------------------------------------------------
 # Docling transcription (runs in a background thread)
 # ---------------------------------------------------------------------------
 
 def _run_transcription(task_id: str, audio_path: Path) -> None:
     log.info("[%s] Starting docling transcription of %s (%d bytes)",
              task_id, audio_path.name, audio_path.stat().st_size)
+
+    # Short-circuit: return an empty transcript rather than let Whisper
+    # hallucinate on a silent WAV chunk.
+    if _is_silent_wav(audio_path):
+        log.info("[%s] Silence detected — skipping Whisper, returning empty transcript", task_id)
+        _set_success(task_id, "")
+        try:
+            audio_path.unlink(missing_ok=True)
+        except Exception:  # noqa: BLE001
+            pass
+        return
+
     try:
         import torch
         from docling.datamodel import asr_model_specs

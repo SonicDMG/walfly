@@ -28,21 +28,28 @@ export async function POST(
     // Ephemeral Transcription: send bytes straight to sidecar/ASR service
     const transcript = await transcribeAudioBytes(bytes, audioFilename, offsetMs);
 
-    // Record stitched transcript and mark chunk as transcribed + purged
-    await recordChunkTranscript({
-      recordingId,
-      chunkIndex,
-      duration,
-      offsetMs,
-      transcript,
-      deletedAt: new Date().toISOString(),
-    });
+    // An empty transcript means the sidecar detected silence and short-circuited.
+    // There is nothing to store, but the chunk is still counted as processed so
+    // the session can finalize correctly.
+    if (transcript) {
+      // Record stitched transcript and mark chunk as transcribed + purged
+      await recordChunkTranscript({
+        recordingId,
+        chunkIndex,
+        duration,
+        offsetMs,
+        transcript,
+        deletedAt: new Date().toISOString(),
+      });
+    } else {
+      console.log(`[Chunks API] ${recordingId} chunk ${chunkIndex}: silent — skipping transcript storage`);
+    }
 
     return NextResponse.json(
       {
         recordingId,
         chunkIndex,
-        status: 'transcribed',
+        status: transcript ? 'transcribed' : 'silent',
         transcriptLength: transcript.length,
       },
       { status: 200 },
