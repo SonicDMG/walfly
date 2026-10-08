@@ -29,7 +29,6 @@
 
 import type { PipelineStage, RecordingStatus } from '@walfly/db';
 import { enrichTranscript, detectMusicFromTranscript } from './enrich';
-import { detectMusic } from './music';
 import {
   acquireLease, getPipelineRecord, recordTransientFailure,
   storeEnrichment, storeFailure, storeMusicDetection, storeTranscript,
@@ -108,21 +107,16 @@ export async function advanceRecording(id: string): Promise<AdvanceResult> {
       if (!(await acquireLease(id, 'enriching', LEASE_ENRICH_MS))) {
         return waiting(id, 'enriching', 'enrich', 5000);
       }
-      const [enrichment, inferredMusic, fingerprintMusic] = await Promise.all([
+      const [enrichment, inferredMusic] = await Promise.all([
         enrichTranscript(record.transcript),
-        // Always run LLM-based transcript detection (the inferred path). It catches
-        // spoken mentions and lyrics that fingerprinting misses.
+        // LLM-based transcript detection catches spoken mentions and lyrics.
+        // Merge-write so audio results from per-chunk handlers are not clobbered.
         detectMusicFromTranscript(record.transcript),
-        // For live sessions the audio is gone — skip fingerprinting. For standard
-        // uploads, fingerprint the full file now.
-        record.isLiveSession ? Promise.resolve(undefined) : detectMusic(record.audioUrl),
       ]);
-      // Inferred matches: merge-write so fingerprint results from chunk handlers are not clobbered.
       if (inferredMusic.detected) {
         await storeMusicDetection(id, inferredMusic);
       }
-      // storeEnrichment handles fingerprint music for standard uploads (music=undefined for live).
-      await storeEnrichment(id, record.transcript, enrichment, fingerprintMusic);
+      await storeEnrichment(id, record.transcript, enrichment, undefined);
       console.log(`[pipeline] ${id} ready — "${enrichment.title}"`);
       return { found: true, id, status: 'ready', stage: 'done', error: null, retryAfterMs: 0 };
     }

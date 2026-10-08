@@ -13,13 +13,12 @@ export interface RecordingLocation {
 }
 
 export interface MusicMatch {
-  source: 'fingerprint' | 'inferred';
+  source: 'audio' | 'inferred';
   title: string;
   artist: string;
   album?: string;
   releaseDate?: string;
-  mbid?: string;               // MusicBrainz recording ID
-  score: number;               // 0–1 confidence; fingerprint ≥ 0.3, inferred ≤ 0.6
+  score: number;               // 0–1 confidence
   playOffsetMs?: number;       // offset into our recording where the match starts
 }
 
@@ -82,7 +81,7 @@ export interface Recording {
   totalExpectedChunks?: number;
   receivedChunks?: number;
   chunks?: RecordingChunk[];
-  music?: MusicDetection;      // populated during enrichment if ACOUSTID_API_KEY is set
+  music?: MusicDetection;      // populated by per-chunk audio analysis and transcript detection
 }
 
 /** Projected shape returned by GET /api/recordings. */
