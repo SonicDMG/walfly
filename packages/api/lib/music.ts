@@ -36,12 +36,13 @@ const MUSIC_AUDIO_PROMPT = `Listen to this audio carefully. Your job is to detec
 
 Respond with valid JSON only:
 {"detected": true, "matches": [{"title": "...", "artist": "...", "album": null, "releaseDate": null, "score": 0.8}]}
-If no music is playing, respond with: {"detected": false, "matches": []}
+If no music is playing, or if you are not highly certain of the identification, respond with: {"detected": false, "matches": []}
 
 Rules:
 - "detected" is true only if an actual song is playing (not just speech, ambient noise, or silence)
-- Include a match only if you can identify at least a song title with reasonable confidence
-- "score" is your confidence in the identification (0.0–1.0)
+- A wrong identification is worse than no identification — only return a match if you are highly certain of the song title
+- If you can hear music but cannot confidently identify it, return {"detected": false, "matches": []}
+- "score" is your confidence in the identification (0.0–1.0); do not return a match with score below 0.85
 - "album" and "releaseDate" are null unless you are confident
 - Do not wrap JSON in prose or code fences`;
 
@@ -107,18 +108,24 @@ export async function detectMusicFromAudio(
       return notDetected();
     }
 
+    const MIN_SCORE = 0.85;
     const matches: MusicMatch[] = [];
     for (const m of parsed.matches as Record<string, unknown>[]) {
       const title = typeof m.title === 'string' && m.title.trim() ? m.title.trim() : null;
       const artist = typeof m.artist === 'string' && m.artist.trim() ? m.artist.trim() : null;
+      const score = typeof m.score === 'number' ? m.score : 0;
       if (!title) continue;
+      if (score < MIN_SCORE) {
+        musicLog(`skipping low-confidence match "${title}" (score ${(score * 100).toFixed(0)}% < ${MIN_SCORE * 100}%)`);
+        continue;
+      }
       matches.push({
         source: 'audio',
         title,
         artist: artist ?? 'Unknown',
         album: typeof m.album === 'string' ? m.album : undefined,
         releaseDate: typeof m.releaseDate === 'string' ? m.releaseDate : undefined,
-        score: typeof m.score === 'number' ? m.score : 0.7,
+        score,
         playOffsetMs: offsetMs,
       });
     }
@@ -141,27 +148,83 @@ export async function detectMusicFromAudio(
 
 /**
  * Merges two sets of music matches into one deduplicated list.
- * Dedup key: artist::title (normalised). Keeps earliest playOffsetMs and best score.
- * audio source wins over inferred (direct hearing beats transcript inference).
+ *
+ * Dedup strategy (two-pass):
+ *   1. Primary key: normalised artist::title — catches identical results.
+ *   2. Title-only fallback: if an existing entry's artist is "unknown" and an
+ *      incoming entry has the same title with a real artist name (or vice versa),
+ *      they are treated as the same song and merged. This prevents the same song
+ *      being stored multiple times when early windows can't identify the artist
+ *      but a later window can.
+ *
+ * Merge rules: audio source beats inferred; earliest playOffsetMs wins; best
+ * score wins; a real artist name beats "unknown".
  */
 export function mergeMusic(existing: MusicMatch[], incoming: MusicMatch[]): MusicMatch[] {
   const seen = new Map<string, MusicMatch>();
 
-  function key(m: MusicMatch): string {
-    return `${m.artist.toLowerCase()}::${m.title.toLowerCase()}`;
+  function normalise(s: string): string {
+    return s.toLowerCase().trim();
+  }
+
+  function isUnknown(artist: string): boolean {
+    return normalise(artist) === 'unknown';
+  }
+
+  function primaryKey(m: MusicMatch): string {
+    return `${normalise(m.artist)}::${normalise(m.title)}`;
+  }
+
+  function titleKey(m: MusicMatch): string {
+    return normalise(m.title);
+  }
+
+  function merge(prev: MusicMatch, next: MusicMatch): MusicMatch {
+    const winnerSource: MusicMatch['source'] =
+      (prev.source === 'audio' || next.source !== 'audio') ? prev.source : 'audio';
+    const playOffsetMs =
+      prev.playOffsetMs !== undefined && next.playOffsetMs !== undefined
+        ? Math.min(prev.playOffsetMs, next.playOffsetMs)
+        : prev.playOffsetMs ?? next.playOffsetMs;
+    // Prefer a real artist name over "unknown"
+    const artist = isUnknown(prev.artist) && !isUnknown(next.artist) ? next.artist : prev.artist;
+    return { ...prev, artist, source: winnerSource, playOffsetMs, score: Math.max(prev.score, next.score) };
   }
 
   for (const m of [...existing, ...incoming]) {
-    const k = key(m);
-    const prev = seen.get(k);
-    if (!prev) { seen.set(k, { ...m }); continue; }
+    const pk = primaryKey(m);
 
-    const winnerSource = (prev.source === 'audio' || m.source !== 'audio') ? prev.source : 'audio' as const;
-    const playOffsetMs =
-      prev.playOffsetMs !== undefined && m.playOffsetMs !== undefined
-        ? Math.min(prev.playOffsetMs, m.playOffsetMs)
-        : prev.playOffsetMs ?? m.playOffsetMs;
-    seen.set(k, { ...prev, source: winnerSource, playOffsetMs, score: Math.max(prev.score, m.score) });
+    // Pass 1: exact artist::title match
+    if (seen.has(pk)) {
+      seen.set(pk, merge(seen.get(pk)!, m));
+      continue;
+    }
+
+    // Pass 2: title-only fallback when one side has an unknown artist
+    if (isUnknown(m.artist)) {
+      const tk = titleKey(m);
+      const titleMatch = [...seen.values()].find(s => normalise(s.title) === tk);
+      if (titleMatch) {
+        // Merge into the existing named-artist entry; don't add a second key
+        const existingKey = primaryKey(titleMatch);
+        seen.set(existingKey, merge(titleMatch, m));
+        continue;
+      }
+    } else {
+      // Incoming has a real artist — check if there is an "unknown" entry for this title
+      const tk = titleKey(m);
+      const unknownEntry = [...seen.values()].find(
+        s => normalise(s.title) === tk && isUnknown(s.artist),
+      );
+      if (unknownEntry) {
+        // Remove the unknown-artist key and re-insert under the real artist key
+        seen.delete(primaryKey(unknownEntry));
+        seen.set(pk, merge(unknownEntry, m));
+        continue;
+      }
+    }
+
+    seen.set(pk, { ...m });
   }
 
   return [...seen.values()].sort((a, b) => (a.playOffsetMs ?? Infinity) - (b.playOffsetMs ?? Infinity));
