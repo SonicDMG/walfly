@@ -5,6 +5,50 @@ import { NextRequest, NextResponse } from 'next/server';
 
 export const runtime = 'nodejs';
 
+// ---------------------------------------------------------------------------
+// Music detection accumulation buffer
+//
+// 15-second chunks give the multimodal LLM too little audio context for
+// reliable song identification. We accumulate 8 consecutive non-silent chunks
+// (~120 s) per recording, then fire a single detection call on the combined
+// buffer. The buffer is module-level so it survives across requests in the
+// same Node.js process lifetime.
+// ---------------------------------------------------------------------------
+const MUSIC_CHUNKS_REQUIRED = 8;
+
+interface MusicBuffer {
+  chunks: Uint8Array[];
+  firstOffsetMs: number;
+}
+const musicBuffers = new Map<string, MusicBuffer>();
+
+function flushMusicBuffer(recordingId: string, filename: string): void {
+  const buf = musicBuffers.get(recordingId);
+  if (!buf || buf.chunks.length < MUSIC_CHUNKS_REQUIRED) return;
+
+  // Concatenate all accumulated chunk bytes into one buffer
+  const totalLength = buf.chunks.reduce((sum, c) => sum + c.byteLength, 0);
+  const combined = new Uint8Array(totalLength);
+  let offset = 0;
+  for (const chunk of buf.chunks) {
+    combined.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  const firstOffsetMs = buf.firstOffsetMs;
+
+  // Clear the buffer immediately before the async call so the next 4 chunks
+  // start accumulating straight away regardless of detection latency.
+  musicBuffers.delete(recordingId);
+
+  void detectMusicFromAudio(combined, filename, firstOffsetMs).then((result) => {
+    if (result.detected) {
+      void storeMusicDetection(recordingId, result).catch((e) =>
+        console.warn('[Chunks API] Failed to store music detection:', e),
+      );
+    }
+  });
+}
+
 export async function POST(
   req: NextRequest,
   { params }: { params: Promise<{ id: string }> },
@@ -47,15 +91,17 @@ export async function POST(
     const bytes = new Uint8Array(arrayBuffer);
     const audioFilename = (audioFile as File).name || `chunk-${chunkIndex}.webm`;
 
-    // Music detection: send this chunk's audio bytes directly to the multimodal
-    // LLM. Fire-and-forget so the chunk response is never delayed.
-    void detectMusicFromAudio(bytes, audioFilename, offsetMs).then((result) => {
-      if (result.detected) {
-        void storeMusicDetection(recordingId, result).catch((e) =>
-          console.warn('[Chunks API] Failed to store music detection:', e),
-        );
-      }
-    });
+    // Music detection: accumulate non-silent chunks and detect every 8th (~120 s).
+    // Fire-and-forget so the chunk response is never delayed.
+    const existing = musicBuffers.get(recordingId);
+    if (existing) {
+      existing.chunks.push(bytes);
+    } else {
+      musicBuffers.set(recordingId, { chunks: [bytes], firstOffsetMs: offsetMs });
+    }
+    if ((musicBuffers.get(recordingId)?.chunks.length ?? 0) >= MUSIC_CHUNKS_REQUIRED) {
+      flushMusicBuffer(recordingId, audioFilename);
+    }
 
     // Ephemeral Transcription: send bytes straight to sidecar/ASR service
     const transcript = await transcribeAudioBytes(bytes, audioFilename, offsetMs);
