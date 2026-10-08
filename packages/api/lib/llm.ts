@@ -60,6 +60,16 @@ export function getJevModel(): string {
   return process.env.JEV_MODEL?.trim() || '~typesafe/jev-latest';
 }
 
+/**
+ * The model to use for LLM-based music detection from transcripts.
+ * Defaults to LLM_MODEL when not set. Override with a model that reliably
+ * identifies song lyrics (e.g. google/gemini-2.5-flash-lite), since some
+ * models refuse to reproduce lyrics for copyright reasons.
+ */
+export function getMusicDetectionModel(): string {
+  return process.env.MUSIC_DETECTION_MODEL?.trim() || getLlmModel();
+}
+
 export function isLlmConfigured(): boolean {
   return Boolean(process.env.LLM_API_KEY && process.env.LLM_MODEL);
 }

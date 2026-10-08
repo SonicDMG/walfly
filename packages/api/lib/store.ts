@@ -18,6 +18,8 @@
  */
 
 import type { EnrichResult } from '@/lib/enrich';
+import { mergeMusic } from '@/lib/music';
+import type { MusicDetection } from '@walfly/db';
 import {
   buildSearchTokens,
   buildVectorizeText,
@@ -257,6 +259,7 @@ export async function getPipelineRecord(id: string): Promise<PipelineRecord | nu
         submittedAt: 1,
         attempts: 1,
         isLiveSession: 1,
+        music: 1,
       },
     },
   );
@@ -278,6 +281,7 @@ export async function getPipelineRecord(id: string): Promise<PipelineRecord | nu
     submittedAt: typeof doc.submittedAt === 'number' ? doc.submittedAt : null,
     attempts: typeof doc.attempts === 'number' ? doc.attempts : 0,
     isLiveSession: doc.isLiveSession ?? false,
+    music: (doc.music as MusicDetection | undefined) ?? undefined,
   };
 }
 
@@ -358,6 +362,7 @@ export async function storeEnrichment(
   id: string,
   transcript: string,
   enrichment: EnrichResult,
+  music?: MusicDetection,
 ): Promise<void> {
   const collection = getRecordingsV2Collection();
   console.log(`[Astra] fetching collection capabilities for ${id}`);
@@ -393,6 +398,9 @@ export async function storeEnrichment(
       keyTakeaways: enrichment.keyTakeaways,
       tags,
     }),
+    // Only write music when we have a result (standard upload). For live
+    // sessions music=undefined so we leave whatever the chunk route stored.
+    ...(music !== undefined ? { music } : {}),
   };
 
   // Unbounded by design: $lexical is exempt from the indexed-string limit.
@@ -456,6 +464,29 @@ export async function recordTransientFailure(
       $inc: { attempts: 1 },
     },
   );
+}
+
+/**
+ * Merge-writes music detection results for a recording. Reads the current music
+ * field, merges incoming matches using mergeMusic (dedup + fingerprint-wins
+ * priority), then writes the combined result back. Called from the chunk route
+ * and from the enrichment step so concurrent handlers never overwrite each other.
+ */
+export async function storeMusicDetection(id: string, incoming: MusicDetection): Promise<void> {
+  const collection = getRecordingsV2Collection();
+
+  // Read current music to merge rather than overwrite.
+  const doc = await collection.findOne({ _id: id }, { projection: { music: 1 } });
+  const existing = (doc?.music as MusicDetection | undefined);
+  const mergedMatches = mergeMusic(existing?.matches ?? [], incoming.matches);
+  const merged: MusicDetection = {
+    detected: mergedMatches.length > 0,
+    matches: mergedMatches,
+    scannedAt: new Date().toISOString(),
+  };
+
+  await collection.updateOne({ _id: id }, { $set: { music: merged } });
+  console.log(`[Astra] ${id} music detection stored — detected=${merged.detected} matches=${merged.matches.length}`);
 }
 
 /** Terminal failure. Keeps the provider's own diagnostics; never touches `notes`. */

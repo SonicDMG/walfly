@@ -38,6 +38,7 @@ import {
   type RecordingPatch,
   type RecordingStatus,
 } from '../../lib/api';
+import type { MusicMatch } from '../../lib/types';
 import { colors, fonts, fontSizes, spacing, radius, shadow } from '../../lib/theme';
 
 /** Playback must not leave the session in record mode, or iOS routes to the earpiece. */
@@ -431,6 +432,11 @@ export default function RecordingDetailScreen() {
           </View>
         ) : null}
 
+        {/* Music detected card */}
+        {recording.music?.detected && recording.music.matches.length > 0 && (
+          <MusicCard matches={recording.music.matches} />
+        )}
+
         {/* Chat Shortcut Button */}
         <Pressable
           style={({ pressed }) => [styles.chatActionBtn, pressed && styles.pressed]}
@@ -493,6 +499,57 @@ function ActionItemsList({ items }: { items: string[] }) {
     </View>
   );
 }
+
+// ─── Music Card ───────────────────────────────────────────────────────────────
+
+function formatOffset(ms: number): string {
+  const totalSec = Math.floor(ms / 1000);
+  const m = Math.floor(totalSec / 60);
+  const s = totalSec % 60;
+  return `${m}:${String(s).padStart(2, '0')}`;
+}
+
+function MusicCard({ matches }: { matches: MusicMatch[] }) {
+  // Sort by offset ascending, songs without offset last
+  const sorted = [...matches].sort((a, b) => {
+    const aOff = a.playOffsetMs ?? Infinity;
+    const bOff = b.playOffsetMs ?? Infinity;
+    return aOff - bOff;
+  });
+
+  return (
+    <View style={styles.section}>
+      <Text style={styles.sectionHeader}>music detected</Text>
+      <View style={styles.musicCard}>
+        {sorted.map((m, i) => (
+          <View key={i} style={[styles.musicRow, i > 0 && styles.musicRowBorder]}>
+            <View style={styles.musicNote}>
+              <Text style={styles.musicNoteText}>♪</Text>
+            </View>
+            <View style={styles.musicInfo}>
+              <View style={styles.musicTitleRow}>
+                <Text style={styles.musicTitle} numberOfLines={1}>{m.title}</Text>
+                {m.source === 'inferred' && (
+                  <View style={styles.inferredBadge}>
+                    <Text style={styles.inferredBadgeText}>inferred</Text>
+                  </View>
+                )}
+              </View>
+              <Text style={styles.musicArtist} numberOfLines={1}>
+                {m.artist}{m.album ? ` — ${m.album}` : ''}{m.releaseDate ? ` (${m.releaseDate.slice(0, 4)})` : ''}
+              </Text>
+            </View>
+            {m.playOffsetMs !== undefined && (
+              <Text style={styles.musicOffset}>{formatOffset(m.playOffsetMs)}</Text>
+            )}
+          </View>
+        ))}
+      </View>
+    </View>
+  );
+}
+
+
 
 // ─── Transcript Line ─────────────────────────────────────────────────────────
 
@@ -1069,6 +1126,79 @@ const styles = StyleSheet.create({
   actionTextChecked: {
     color: colors.mist,
     textDecorationLine: 'line-through',
+  },
+
+  // Music Card
+  musicCard: {
+    backgroundColor: colors.obsidian,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    borderColor: colors.border,
+    overflow: 'hidden',
+  },
+  musicRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm,
+  },
+  musicRowBorder: {
+    borderTopWidth: 1,
+    borderTopColor: colors.border,
+  },
+  musicNote: {
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    backgroundColor: colors.amberSubtle,
+    borderWidth: 1,
+    borderColor: colors.amberGlow,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  musicNoteText: {
+    fontSize: fontSizes.sm,
+    color: colors.amber,
+  },
+  musicInfo: {
+    flex: 1,
+    gap: 2,
+  },
+  musicTitleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.xs,
+  },
+  musicTitle: {
+    fontFamily: fonts.bodyMed,
+    fontSize: fontSizes.base,
+    color: colors.cream,
+    flexShrink: 1,
+  },
+  inferredBadge: {
+    backgroundColor: colors.charcoal,
+    borderRadius: radius.full,
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  inferredBadgeText: {
+    fontFamily: fonts.body,
+    fontSize: 10,
+    color: colors.fog,
+  },
+  musicArtist: {
+    fontFamily: fonts.body,
+    fontSize: fontSizes.sm,
+    color: colors.mist,
+  },
+  musicOffset: {
+    fontFamily: fonts.bold,
+    fontSize: fontSizes.xs,
+    color: colors.amber,
+    letterSpacing: 0.5,
   },
 
   // Notes

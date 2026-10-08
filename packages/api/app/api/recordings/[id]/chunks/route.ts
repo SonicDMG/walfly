@@ -1,4 +1,5 @@
-import { recordChunkTranscript } from '@/lib/store';
+import { addChunkToMusicBuffer, detectMusicFromBytes, detectMusicFromChunks, markMusicDetected } from '@/lib/music';
+import { recordChunkTranscript, storeMusicDetection } from '@/lib/store';
 import { transcribeAudioBytes } from '@/lib/transcribe';
 import { NextRequest, NextResponse } from 'next/server';
 
@@ -45,6 +46,42 @@ export async function POST(
     const arrayBuffer = await audioFile.arrayBuffer();
     const bytes = new Uint8Array(arrayBuffer);
     const audioFilename = (audioFile as File).name || `chunk-${chunkIndex}.webm`;
+
+    // Music detection: accumulate 4 chunks (≈60 s) before fingerprinting.
+    // Individual 15 s chunks are too short for reliable AcoustID matching, so
+    // we buffer consecutive chunks and fingerprint the combined 60 s buffer.
+    // The buffer is module-level and persists in `next dev` (single process);
+    // in cold-start serverless it starts empty and we fall back to per-chunk
+    // detection on the first chunk of each recording.
+    const { combined, single, skip } = addChunkToMusicBuffer(recordingId, {
+      bytes,
+      filename: audioFilename,
+    });
+
+    if (!skip) {
+      if (combined) {
+        // Got 4 chunks — fingerprint the 60 s combined buffer.
+        void detectMusicFromChunks(combined).then((result) => {
+          if (result.detected) {
+            void storeMusicDetection(recordingId, result).catch((e) =>
+              console.warn('[Chunks API] Failed to store music detection:', e),
+            );
+            markMusicDetected(recordingId);
+          }
+        }).catch(() => { /* already non-throwing, belt-and-suspenders */ });
+      }
+      if (single) {
+        // Per-chunk fallback: run detection on this individual 15 s chunk.
+        void detectMusicFromBytes(single.bytes, single.filename).then((result) => {
+          if (result.detected) {
+            void storeMusicDetection(recordingId, result).catch((e) =>
+              console.warn('[Chunks API] Failed to store music detection:', e),
+            );
+            markMusicDetected(recordingId);
+          }
+        }).catch(() => { /* already non-throwing, belt-and-suspenders */ });
+      }
+    }
 
     // Ephemeral Transcription: send bytes straight to sidecar/ASR service
     const transcript = await transcribeAudioBytes(bytes, audioFilename, offsetMs);

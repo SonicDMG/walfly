@@ -15,6 +15,23 @@ export interface RecordingLocation {
   placeName: string | null;
 }
 
+export interface MusicMatch {
+  source: 'fingerprint' | 'inferred';
+  title: string;
+  artist: string;
+  album?: string;
+  releaseDate?: string;
+  mbid?: string;               // MusicBrainz recording ID
+  score: number;               // 0–1 confidence; fingerprint ≥ 0.3, inferred ≤ 0.6
+  playOffsetMs?: number;       // offset into our recording where the match starts
+}
+
+export interface MusicDetection {
+  detected: boolean;
+  matches: MusicMatch[];
+  scannedAt: string;           // ISO 8601
+}
+
 export type ChunkStatus = 'uploading' | 'uploaded' | 'transcribing' | 'transcribed' | 'failed';
 
 export interface RecordingChunk {
@@ -69,6 +86,7 @@ export interface Recording {
   totalExpectedChunks?: number;
   receivedChunks?: number;
   chunks?: RecordingChunk[];
+  music?: MusicDetection;
 }
 
 /** Projected shape returned by GET /api/recordings. */

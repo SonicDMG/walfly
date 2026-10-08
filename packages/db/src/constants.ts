@@ -36,7 +36,7 @@ export const CHUNKS_INDEXING_DENY = [
  *  (eliminates the 8KB limit concern regardless of chunk length). */
 export const INDEXING_DENY_V2 = [
   'transcript', 'summary', 'notes', 'keyTakeaways', 'actionItems',
-  'audioUrl', 'speakers', 'error', 'doclingTaskId', 'chunks',
+  'audioUrl', 'speakers', 'error', 'doclingTaskId', 'chunks', 'music',
 ] as const;
 export const CHUNKS_INDEXING_DENY_V2 = [
   'transcript', 'audioUrl',
