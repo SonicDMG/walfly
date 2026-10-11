@@ -31,7 +31,7 @@ export function apiBaseUrl(): string {
   }
 
   if (Platform.OS === 'web') {
-    cachedBaseUrl = 'http://localhost:3000';
+    cachedBaseUrl = 'http://localhost:3030';
     return cachedBaseUrl;
   }
 
