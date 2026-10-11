@@ -15,6 +15,8 @@ export interface QueuedChunk {
   duration: number;
   blob?: Blob;
   uri?: string;
+  /** Multipart filename override (e.g. `chunk-3.aac` for Bee ADTS chunks). */
+  filename?: string;
   attempts: number;
   silent?: boolean;
 }
@@ -117,7 +119,7 @@ class ChunkUploadQueue {
         formData.append('audio', chunk.blob, `chunk-${chunk.chunkIndex}.${ext}`);
       } else if (chunk.uri) {
         const fileRef = new ExpoFile(chunk.uri);
-        formData.append('audio', fileRef, `chunk-${chunk.chunkIndex}.mp4`);
+        formData.append('audio', fileRef, chunk.filename ?? `chunk-${chunk.chunkIndex}.mp4`);
       }
 
       const res = await fetch(apiUrl(`/api/recordings/${encodeURIComponent(chunk.recordingId)}/chunks`), {
