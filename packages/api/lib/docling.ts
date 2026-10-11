@@ -113,6 +113,12 @@ export function sniffAudioContainer(bytes: Uint8Array): AudioContainer | null {
   }
   if (at(4, 4) === 'ftyp') return { ext: 'm4a', mime: 'audio/mp4' };
   if (at(0, 3) === 'ID3') return { ext: 'mp3', mime: 'audio/mpeg' };
+  // ADTS AAC before the generic MPEG sync check: an ADTS header is 0xFF 0xF0
+  // (ID 0 = MPEG-4) or 0xFF 0xF8 (ID 1 = MPEG-2) with layer bits 00, which the
+  // looser MP3 rule below would otherwise claim and mislabel as audio/mpeg.
+  // 0xF1 & 0xF6 = 0xF0 (MPEG-4): an MP3 header like 0xFB & 0xF6 = 0xF2 falls
+  // through to the MP3 branch untouched.
+  if (bytes[0] === 0xff && (bytes[1] & 0xf6) === 0xf0) return { ext: 'aac', mime: 'audio/aac' };
   if (bytes[0] === 0xff && (bytes[1] & 0xe0) === 0xe0) return { ext: 'mp3', mime: 'audio/mpeg' };
   return null;
 }
