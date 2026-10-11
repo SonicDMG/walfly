@@ -11,6 +11,7 @@
     "ios": "cd apps/mobile && npx expo run:ios --no-bundler --device 'iPhone 17 Pro'",
     "dev:api": "concurrently -n sidecar,api -c magenta,blue \"uv run --project packages/api/sidecar python packages/api/sidecar/transcribe_sidecar.py\" \"npm run dev --workspace=packages/api -- --port 3030\"",
     "dev:mobile": "npm run dev --workspace=apps/mobile",
+    "deploy:asr": "fly deploy --config packages/api/sidecar/fly.toml",
     "build": "npm run build --workspace=packages/db && npm run build --workspace=packages/api && npm run build --workspace=apps/mobile",
     "build:api": "npm run build --workspace=packages/api",
     "build:mobile": "npm run build --workspace=apps/mobile"
