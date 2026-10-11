@@ -11,7 +11,11 @@
     ],
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "com.walfly.app"
+      "bundleIdentifier": "com.walfly.app",
+      "infoPlist": {
+        "NSBluetoothAlwaysUsageDescription": "Walfly connects to your Bee Pioneer over Bluetooth to capture audio for transcription.",
+        "NSBluetoothPeripheralUsageDescription": "Walfly connects to your Bee Pioneer over Bluetooth to capture audio for transcription."
+      }
     },
     "android": {
       "adaptiveIcon": {
@@ -28,6 +32,14 @@
     "plugins": [
       "expo-dev-client",
       "expo-router",
+      [
+        "react-native-ble-plx",
+        {
+          "isBackgroundEnabled": true,
+          "modes": ["central"],
+          "bluetoothAlwaysPermission": "Walfly connects to your Bee Pioneer over Bluetooth to capture audio for transcription."
+        }
+      ],
       [
         "expo-audio",
         {
