@@ -25,14 +25,17 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { WEB_TAB_BAR_HEIGHT } from './_layout';
 import ProgressIndicator from '../../components/ProgressIndicator';
 import { useRecordingUpload, RecordState } from '../../hooks/useRecordingUpload';
+import { useBeePioneerRecorder, BeeRecordState } from '../../hooks/useBeePioneerRecorder';
 import { Ionicons } from '@expo/vector-icons';
 import { colors, fonts, fontSizes, spacing, shadow } from '../../lib/theme';
 
 const BUSY_STATES = new Set<RecordState>(['uploading', 'processing', 'requesting']);
+const BEE_BUSY_STATES = new Set<BeeRecordState>(['connecting', 'uploading', 'processing']);
 
 export default function RecordScreen() {
   const { state, error, progress, startRecording, stopAndUpload, reset } =
     useRecordingUpload();
+  const bee = useBeePioneerRecorder();
   const insets = useSafeAreaInsets();
 
   const pulseAnim = useRef(new Animated.Value(1)).current;
@@ -94,6 +97,7 @@ export default function RecordScreen() {
   }, [state, pulseAnim, glowAnim]);
 
   function handlePress() {
+    if (beeRecording || beeBusy) return; // one capture source at a time
     if (state === 'recording') { void stopAndUpload(); return; }
     if (state === 'idle' || state === 'error' || state === 'done') {
       void (async () => {
@@ -103,10 +107,23 @@ export default function RecordScreen() {
     }
   }
 
+  function handleBeePress() {
+    if (bee.state === 'recording') { void bee.stopAndUpload(); return; }
+    if (bee.state === 'idle' || bee.state === 'error' || bee.state === 'done') {
+      void (async () => {
+        if (bee.state === 'error' || bee.state === 'done') await bee.reset();
+        await bee.startRecording();
+      })();
+    }
+  }
+
   const isRecording = state === 'recording';
   const isBusy      = BUSY_STATES.has(state);
   const isDone      = state === 'done';
   const isError     = state === 'error';
+  const beeRecording = bee.state === 'recording';
+  const beeBusy      = BEE_BUSY_STATES.has(bee.state);
+  const beeDisabled  = beeBusy || isBusy || isRecording;
 
   const glowOpacity = glowAnim.interpolate({ inputRange: [0, 1], outputRange: [0.1, 0.45] });
   const glowScale   = glowAnim.interpolate({ inputRange: [0, 1], outputRange: [1.1, 1.55] });
@@ -116,7 +133,7 @@ export default function RecordScreen() {
       {/* Wordmark */}
       <Text style={styles.wordmark}>walfly</Text>
       <Reanimated.Text style={[styles.tagline, nudgeStyle]}>
-        {labelFor(state)}
+        {beeRecording ? 'bee pioneer — streaming' : labelFor(state)}
       </Reanimated.Text>
 
       {/* Glow ring — only during recording */}
@@ -132,7 +149,7 @@ export default function RecordScreen() {
 
         <Pressable
           onPress={handlePress}
-          disabled={isBusy}
+          disabled={isBusy || beeBusy || beeRecording}
           accessibilityRole="button"
           accessibilityLabel={isRecording ? 'Stop recording' : 'Start recording'}
         >
@@ -164,6 +181,27 @@ export default function RecordScreen() {
         </View>
       )}
 
+      {/* Bee Pioneer — streams from the wearable's mics through the same pipeline */}
+      <Pressable onPress={handleBeePress} disabled={beeDisabled} accessibilityRole="button">
+        <View style={[styles.beePill, beeRecording && styles.beePillActive, beeDisabled && styles.beePillDisabled]}>
+          <Ionicons
+            name={beeRecording ? 'radio' : 'bluetooth'}
+            size={14}
+            color={beeRecording ? colors.amber : colors.mist}
+          />
+          <Text style={[styles.beeText, beeRecording && styles.beeTextActive]}>
+            {beeLabelFor(bee.state, bee.battery?.level)}
+          </Text>
+        </View>
+      </Pressable>
+
+      {bee.state === 'error' && bee.error && (
+        <View style={styles.errorBox}>
+          <Text style={styles.errorText}>{bee.error}</Text>
+          <Text style={styles.errorHint}>tap the bee button to try again</Text>
+        </View>
+      )}
+
       {/* Progress */}
       {(state === 'uploading' || state === 'processing') && (
         <ProgressIndicator variant="bar" progress={progress} />
@@ -192,6 +230,19 @@ function labelFor(state: RecordState): string {
     case 'processing': return 'processing…';
     case 'done':       return 'Saved — check Moments';
     case 'error':      return 'something went wrong';
+  }
+}
+
+function beeLabelFor(state: BeeRecordState, batteryLevel?: number): string {
+  const battery = batteryLevel !== undefined ? ` · ${batteryLevel}%` : '';
+  switch (state) {
+    case 'idle':       return 'stream from bee pioneer';
+    case 'connecting': return 'connecting to bee…';
+    case 'recording':  return `bee live${battery} — tap to stop`;
+    case 'uploading':  return 'uploading bee audio…';
+    case 'processing': return 'processing bee audio…';
+    case 'done':       return 'bee — saved to moments';
+    case 'error':      return 'bee — tap to retry';
   }
 }
 
@@ -284,5 +335,32 @@ const styles = StyleSheet.create({
     fontFamily: fonts.body,
     fontSize: fontSizes.xs,
     color: colors.mist,
+  },
+  beePill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.xs,
+    paddingHorizontal: spacing.md,
+    paddingVertical: 8,
+    borderRadius: 999,
+    borderWidth: 1,
+    borderColor: colors.border,
+    backgroundColor: colors.obsidian,
+    marginTop: spacing.sm,
+  },
+  beePillActive: {
+    borderColor: colors.amber,
+  },
+  beePillDisabled: {
+    opacity: 0.5,
+  },
+  beeText: {
+    fontFamily: fonts.body,
+    fontSize: fontSizes.xs,
+    color: colors.mist,
+    letterSpacing: 0.4,
+  },
+  beeTextActive: {
+    color: colors.cream,
   },
 });
