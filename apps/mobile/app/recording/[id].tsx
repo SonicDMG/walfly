@@ -187,7 +187,7 @@ export default function RecordingDetailScreen() {
     try {
       const res = await fetch(apiUrl(`/api/recordings/${safeId}`), { method: 'DELETE' });
       if (!res.ok) throw new Error(`Delete failed (HTTP ${res.status})`);
-      router.back();
+      goBackToMoments();
     } catch (err) {
       if (Platform.OS === 'web') {
         window.alert(describeRequestError(err, 'Failed to delete recording'));
@@ -196,6 +196,12 @@ export default function RecordingDetailScreen() {
       }
       console.error('[detail] delete failed:', err);
     }
+  }
+
+  // On web, a deep link or page refresh leaves no history — fall back to the moments list.
+  function goBackToMoments() {
+    if (router.canGoBack()) router.back();
+    else router.replace('/recordings');
   }
 
   // Deduplicated title save — shared by onSubmitEditing and onBlur (CWE fix: race)
@@ -265,7 +271,7 @@ export default function RecordingDetailScreen() {
       <View style={[styles.navBar, { paddingTop: insets.top + spacing.xs }]}>
         <Pressable
           style={({ pressed }) => [styles.backBtn, pressed && styles.pressed]}
-          onPress={() => router.back()}
+          onPress={goBackToMoments}
           accessibilityRole="button"
           accessibilityLabel="Back to moments"
         >
