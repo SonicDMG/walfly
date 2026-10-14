@@ -101,40 +101,66 @@ class AsrPool:
 
     # ── internals ───────────────────────────────────────────────────────────
     def _worker(self, index: int) -> None:
-        settings = self._settings
-        if self._model_factory is not None:
-            model = self._model_factory()
-        else:
-            from faster_whisper import WhisperModel
-
-            started = time.monotonic()
-            model = WhisperModel(
-                settings.model,
-                device=settings.device,
-                compute_type=settings.compute_type,
-                cpu_threads=settings.cpu_threads,
-                num_workers=1,
-            )
-            log.info(
-                "worker %d loaded model %s (%s/%s) in %.1fs",
-                index, settings.model, settings.device, settings.compute_type,
-                time.monotonic() - started,
-            )
-        with self._loaded_lock:
-            self._loaded += 1
-            if self._loaded >= len(self._threads):
-                self._models_ready.set()
+        """Own one model, execute jobs forever. Failures are contained here:
+        a broken model load or decode must degrade to empty results, never
+        wedge a session (its `final` has its own timeout on the session side)."""
+        model: object | None = None
+        next_load_attempt = 0.0
 
         while True:
             job = self._jobs.get()
             if job is None:
                 return
+
+            if model is None and time.monotonic() >= next_load_attempt:
+                try:
+                    model = self._load_model(index)
+                    with self._loaded_lock:
+                        self._loaded += 1
+                        if self._loaded >= len(self._threads):
+                            self._models_ready.set()
+                except Exception as exc:  # noqa: BLE001
+                    log.exception(
+                        "worker %d could not load model %r (%s); answering jobs empty and retrying in 30s",
+                        index, self._settings.model, exc,
+                    )
+                    next_load_attempt = time.monotonic() + 30.0
+
+            if model is None:
+                job.result_q.put(self._empty_result(job))
+                continue
+
             try:
                 result = self._decode(model, job)
             except Exception as exc:  # noqa: BLE001 — a bad decode must not kill the worker
                 log.exception("decode failed for session %s (%s): %s", job.session_id, job.kind, exc)
-                result = DecodeResult(job=job, text="", words=[], avg_logprob=-1.0, decode_ms=0.0)
+                result = self._empty_result(job)
             job.result_q.put(result)
+
+    def _load_model(self, index: int) -> object:
+        settings = self._settings
+        if self._model_factory is not None:
+            return self._model_factory()
+        from faster_whisper import WhisperModel
+
+        started = time.monotonic()
+        model = WhisperModel(
+            settings.model,
+            device=settings.device,
+            compute_type=settings.compute_type,
+            cpu_threads=settings.cpu_threads,
+            num_workers=1,
+        )
+        log.info(
+            "worker %d loaded model %s (%s/%s) in %.1fs",
+            index, settings.model, settings.device, settings.compute_type,
+            time.monotonic() - started,
+        )
+        return model
+
+    @staticmethod
+    def _empty_result(job: DecodeJob) -> DecodeResult:
+        return DecodeResult(job=job, text="", words=[], avg_logprob=-1.0, decode_ms=0.0)
 
     def _decode(self, model: object, job: DecodeJob) -> DecodeResult:
         if job.kind == PARTIAL:

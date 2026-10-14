@@ -116,6 +116,9 @@ export function useRecordingUpload() {
   const prerollRef = useRef<Int16Array[] | null>(null);
   // Native capture flag: buffers arriving outside a recording are ignored.
   const nativeActiveRef = useRef(false);
+  // True from the moment capture+stream are live until a stop is claimed;
+  // drives the "sidecar ended the session" path.
+  const recordingActiveRef = useRef(false);
 
   const { requestAndCapture } = useLocationPermission();
 
@@ -343,6 +346,17 @@ export function useRecordingUpload() {
         onGap: (fromMs, toMs) => {
           console.warn(`[Stream] audio gap ${fromMs}–${toMs} ms`);
         },
+        onEnded: () => {
+          // The sidecar ended the session by itself (idle timeout, capacity,
+          // max duration). Everything checkpointed is durable; finalize and
+          // let the pipeline enrich it rather than reconnecting into a dead
+          // session. The user can simply record again.
+          console.warn('[Stream] the sidecar ended the session; finalizing');
+          if (recordingActiveRef.current) {
+            recordingActiveRef.current = false;
+            void stopRef.current();
+          }
+        },
       });
       clientRef.current = client;
 
@@ -352,6 +366,7 @@ export function useRecordingUpload() {
         for (const frame of preroll) client.push(frame);
       }
 
+      recordingActiveRef.current = true;
       safeSetState('recording');
 
       maxDurationTimerRef.current = setTimeout(() => {
@@ -359,6 +374,7 @@ export function useRecordingUpload() {
         stopRef.current();
       }, MAX_RECORDING_MS);
     } catch (err) {
+      recordingActiveRef.current = false;
       await teardownCapture();
       await releaseIosRecordSession();
       if (mountedRef.current) {
@@ -380,6 +396,7 @@ export function useRecordingUpload() {
     clientRef.current = null;
     webMicRef.current = null;
     nativeActiveRef.current = false;
+    recordingActiveRef.current = false;
 
     clearTimers();
 

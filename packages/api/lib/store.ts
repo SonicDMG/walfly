@@ -93,6 +93,7 @@ export async function createLiveSession(input: CreateLiveSessionInput): Promise<
     checkpointSeq: 0,
     totalExpectedChunks: 0,
     receivedChunks: 0,
+    lastChunkIndex: -1,
   };
 
   console.log(`[Astra] creating live session recording ${input.id}`);
@@ -192,30 +193,42 @@ export async function recordSegmentTranscript(
   const previousLast = typeof doc.lastChunkIndex === 'number' ? doc.lastChunkIndex : -1;
   const previousCount = typeof doc.receivedChunks === 'number' ? doc.receivedChunks : 0;
 
-  let transcript: string;
-  let receivedChunks: number;
-  let lastChunkIndex: number;
-
+  // Fast path: compare-and-set on lastChunkIndex. A retry racing this post
+  // moves the index first, so the CAS misses and we fall through to the
+  // rebuild — the append can never double up on a duplicate POST.
   if (previousLast + 1 === input.chunkIndex) {
-    transcript = previousTranscript ? `${previousTranscript}\n\n${line}` : line;
-    receivedChunks = previousCount + 1;
-    lastChunkIndex = input.chunkIndex;
-  } else {
-    const cursor = segmentsCollection.find(
-      { recordingId: input.recordingId },
-      { sort: { chunkIndex: 1 } },
+    const appended = previousTranscript ? `${previousTranscript}\n\n${line}` : line;
+    const cas = await recordingsCollection.updateOne(
+      { _id: input.recordingId, lastChunkIndex: previousLast },
+      {
+        $set: {
+          transcript: appended,
+          receivedChunks: previousCount + 1,
+          lastChunkIndex: input.chunkIndex,
+        },
+      },
     );
-    const allSegments = await cursor.toArray();
-    transcript = allSegments
-      .map((segment) => segment.transcript)
-      .filter(Boolean)
-      .join('\n\n');
-    receivedChunks = allSegments.length;
-    lastChunkIndex = allSegments.reduce(
-      (max, segment) => Math.max(max, typeof segment.chunkIndex === 'number' ? segment.chunkIndex : -1),
-      -1,
-    );
+    if (cas.matchedCount === 1) {
+      return { receivedChunks: previousCount + 1 };
+    }
+    console.warn(`[Astra] ${input.recordingId}: segment ${input.chunkIndex} append raced; rebuilding transcript`);
   }
+
+  // Rebuild path: re-stitch from the segment log (idempotent by construction).
+  const cursor = segmentsCollection.find(
+    { recordingId: input.recordingId },
+    { sort: { chunkIndex: 1 } },
+  );
+  const allSegments = await cursor.toArray();
+  const transcript = allSegments
+    .map((segment) => segment.transcript)
+    .filter(Boolean)
+    .join('\n\n');
+  const receivedChunks = allSegments.length;
+  const lastChunkIndex = allSegments.reduce(
+    (max, segment) => Math.max(max, typeof segment.chunkIndex === 'number' ? segment.chunkIndex : -1),
+    -1,
+  );
 
   await recordingsCollection.updateOne(
     { _id: input.recordingId },

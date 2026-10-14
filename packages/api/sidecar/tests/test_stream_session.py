@@ -33,8 +33,9 @@ class FakeVad:
 
 
 class FakeTranscriber:
-    def __init__(self, final_text: str | None = None) -> None:
+    def __init__(self, final_text: str | None = None, answer_finals: bool = True) -> None:
         self.final_text = final_text
+        self.answer_finals = answer_finals
         self.submitted: list[DecodeJob] = []
         self._lock = threading.Lock()
 
@@ -56,13 +57,15 @@ class FakeTranscriber:
             ]
             result = DecodeResult(job=job, text=" ".join(w.word for w in words), words=words,
                                   avg_logprob=-0.2, decode_ms=10.0)
-        else:
+        elif self.answer_finals:
             words = [
                 WordTok(word="final", start=job.window_start_s, end=job.window_start_s + 1.0),
                 WordTok(word=f"seg{job.seq}", start=job.window_start_s + 1.0, end=job.window_start_s + 2.0),
             ]
             text = self.final_text if self.final_text is not None else "final seg%d transcript" % job.seq
             result = DecodeResult(job=job, text=text, words=words, avg_logprob=-0.3, decode_ms=15.0)
+        else:
+            return  # a wedged worker: the final simply never returns
         job.result_q.put(result)
 
 
@@ -199,3 +202,43 @@ def test_attached_flag_follows_sink():
     assert session.attached
     session.set_sink(None)
     assert not session.attached
+
+
+def test_vad_frame_errors_are_contained():
+    class RaisingVad:
+        def __call__(self, frame):  # noqa: ARG002
+            raise RuntimeError("onnxruntime hiccup")
+
+    session = StreamSession(
+        session_id="vad-fail", settings=Settings(), pool=FakeTranscriber(), vad_factory=RaisingVad,
+    )
+    collected: list[dict] = []
+    session.set_sink(collected.append)
+    session.start()
+    seq = feed(session, speech=True, seconds=2.0, start_seq=0)
+    feed(session, speech=False, seconds=0.5, start_seq=seq)
+    session.handle_control({"t": "bye"})
+    assert session.wait_finished(5.0), "a failing VAD frame must not kill the session"
+    assert of_type(collected, "final")
+    assert of_type(collected, "segment") == []  # every frame was treated as silence
+
+
+def test_wedged_final_is_abandoned():
+    settings = replace(Settings(), final_timeout_s=0.2)
+    session = StreamSession(
+        session_id="wedged",
+        settings=settings,
+        pool=FakeTranscriber(answer_finals=False),
+        vad_factory=FakeVad,
+    )
+    collected: list[dict] = []
+    session.set_sink(collected.append)
+    session.start()
+    seq = feed(session, speech=False, seconds=0.3, start_seq=0)
+    seq = feed(session, speech=True, seconds=2.5, start_seq=seq)
+    feed(session, speech=False, seconds=1.2, start_seq=seq)
+    session.handle_control({"t": "bye"})
+    assert session.wait_finished(5.0), "a decode that never returns must not wedge the session"
+    assert of_type(collected, "segment") == []
+    final = of_type(collected, "final")
+    assert final and final[-1]["lastSeq"] == 0  # seq consumed, nothing emitted

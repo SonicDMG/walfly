@@ -51,6 +51,8 @@ export interface AudioStreamClientOptions {
   onSegment(segment: StreamSegment): Promise<void>;
   onState?(state: StreamConnectionState, detail?: string): void;
   onGap?(fromMs: number, toMs: number): void;
+  /** The sidecar ended the session by itself (idle timeout, capacity, deploy). */
+  onEnded?(reason: 'server'): void;
 }
 
 const PROTOCOL_NAME = 'walfly.v1';
@@ -303,8 +305,18 @@ export class AudioStreamClient {
         break;
       }
       case 'final': {
+        const wasStopping = this._stopping;
         this._stopResolve?.();
         this._stopResolve = null;
+        if (!wasStopping && !this._stopped) {
+          // The sidecar ended the session on its own (idle timeout, capacity,
+          // max duration, deploy). Stop retrying and let the caller finalize
+          // what is already durable instead of reconnecting into a dead session.
+          this._stopped = true;
+          this._clearTimers();
+          this._closeSocket();
+          this._options.onEnded?.('server');
+        }
         break;
       }
       case 'flow':

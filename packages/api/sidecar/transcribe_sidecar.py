@@ -277,6 +277,10 @@ async def stream(websocket: WebSocket) -> None:
                 seq, _t_ms, payload = parsed
                 if expected_seq is not None and seq < expected_seq:
                     continue  # duplicate after resume
+                if expected_seq is not None and seq > expected_seq:
+                    # The client's local buffer dropped frames under overload:
+                    # surface the hole explicitly (frames are 100 ms by contract).
+                    outbox.put_nowait(protocol.gap(expected_seq * 100, seq * 100))
                 expected_seq = seq + 1
                 samples = resampler.process(payload) if resampler else _pcm_to_float32(payload)
                 session.feed_audio(seq, samples)

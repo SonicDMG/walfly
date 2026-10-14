@@ -72,6 +72,7 @@ class Settings:
     session_ttl_s: int = 300          # keep a detached session resumable this long
     idle_timeout_s: int = 45          # no audio and no ping → close
     max_session_s: int = 4 * 3600     # hard ceiling per session
+    final_timeout_s: float = 180.0    # abandon a wedged final decode past this
 
     # Queue/backpressure (milliseconds of 16 kHz audio)
     queue_high_ms: int = 15_000

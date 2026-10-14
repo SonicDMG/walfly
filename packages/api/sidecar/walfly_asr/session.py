@@ -102,10 +102,13 @@ class StreamSession:
         self._next_emit_seq = 0                     # next seq eligible to emit
         self._pending_finals = 0
         self._finals_waiting: dict[int, DecodeResult] = {}
+        self._final_started: dict[int, float] = {}  # seq → monotonic start (timeout guard)
+        self._abandoned: set[int] = set()           # seqs whose decode never returned
         self._last_final_words: list[WordTok] = []
         self._last_final_text: str | None = None
         self._last_emitted_seq = -1
-        self._unacked: deque[dict] = deque()
+        self._unacked: deque[tuple[dict, float]] = deque()  # (segment message, monotonic ts)
+        self._vad_error_logged = False
 
         self._stop_requested = threading.Event()
         self._flush_done = False
@@ -219,7 +222,7 @@ class StreamSession:
         self._stop_requested.set()
 
     def unacked_since(self, from_seq: int) -> list[dict]:
-        return [segment for segment in list(self._unacked) if segment["seq"] > from_seq]
+        return [message for message, _ts in list(self._unacked) if message["seq"] > from_seq]
 
     def snapshot(self) -> dict:
         return {
@@ -251,6 +254,7 @@ class StreamSession:
                     if seq > self._consumed_seq:
                         self._consumed_seq = seq
                 self._drain_results()
+                self._abandon_stale_finals()
 
                 if self._stop_requested.is_set():
                     if not self._flush_done and self._audio_q.empty():
@@ -279,7 +283,7 @@ class StreamSession:
                     continue
                 if seq > self._ack_seq:
                     self._ack_seq = seq
-                    while self._unacked and self._unacked[0]["seq"] <= seq:
+                    while self._unacked and self._unacked[0][0]["seq"] <= seq:
                         self._unacked.popleft()
             elif kind == "bye":
                 self._stop_requested.set()
@@ -298,7 +302,13 @@ class StreamSession:
             window = buffer[index * FRAME_SAMPLES:(index + 1) * FRAME_SAMPLES]
             self._vad_processed += FRAME_SAMPLES
             now_s = self._vad_processed / self._settings.sample_rate
-            probability = float(vad(window))  # type: ignore[operator]
+            try:
+                probability = float(vad(window))  # type: ignore[operator]
+            except Exception:  # noqa: BLE001 — a transient frame error must not kill the session
+                if not self._vad_error_logged:
+                    log.exception("session %s: VAD frame failed; treating as silence", self.session_id)
+                    self._vad_error_logged = True
+                probability = 0.0
             self._remember_rms(window, now_s)
             event = self._segmenter.process(probability, now_s)
             if isinstance(event, Open):
@@ -339,6 +349,7 @@ class StreamSession:
         seq = self._next_seq
         self._next_seq += 1
         self._pending_finals += 1
+        self._final_started[seq] = time.monotonic()
         self._pool.submit(DecodeJob(
             session_id=self.session_id,
             kind=FINAL,
@@ -435,12 +446,42 @@ class StreamSession:
             self._emit(protocol.partial(self._partial_revision, self._committed_until_s, text))
 
     def _handle_final(self, result: DecodeResult) -> None:
-        self._pending_finals -= 1
-        self._finals_waiting[result.job.seq] = result
+        seq = result.job.seq
+        self._final_started.pop(seq, None)
+        if seq < self._next_emit_seq:
+            # Already abandoned (worker timeout) or emitted — nothing to record.
+            return
+        self._pending_finals = max(0, self._pending_finals - 1)
+        self._finals_waiting[seq] = result
         self._emit_ready_finals()
 
+    def _abandon_stale_finals(self) -> None:
+        """Bound how long one wedged decode can hold a session's `final`."""
+        if not self._final_started:
+            return
+        now = time.monotonic()
+        stale = [
+            seq for seq, started in self._final_started.items()
+            if now - started > self._settings.final_timeout_s
+        ]
+        for seq in stale:
+            started = self._final_started.pop(seq)
+            log.error(
+                "session %s: abandoning final seq=%d after %.0fs (decode never returned)",
+                self.session_id, seq, now - started,
+            )
+            self._pending_finals = max(0, self._pending_finals - 1)
+            self._finals_waiting.pop(seq, None)
+            self._abandoned.add(seq)
+        if stale:
+            self._emit_ready_finals()
+
     def _emit_ready_finals(self) -> None:
-        while self._next_emit_seq in self._finals_waiting:
+        while self._next_emit_seq in self._finals_waiting or self._next_emit_seq in self._abandoned:
+            if self._next_emit_seq in self._abandoned:
+                self._abandoned.discard(self._next_emit_seq)
+                self._next_emit_seq += 1
+                continue
             result = self._finals_waiting.pop(self._next_emit_seq)
             self._next_emit_seq += 1
             self._emit_one_final(result)
@@ -467,8 +508,11 @@ class StreamSession:
         self._last_final_text = text
         self._last_emitted_seq = job.seq
         self._final_texts.append(text)
-        self._unacked.append(message)
+        self._unacked.append((message, time.monotonic()))
         while len(self._unacked) > self._settings.replay_ring_segments:
+            self._unacked.popleft()
+        replay_cutoff = time.monotonic() - self._settings.replay_ring_ms / 1000.0
+        while self._unacked and self._unacked[0][1] < replay_cutoff:
             self._unacked.popleft()
         self._emit(message)
 
