@@ -166,15 +166,16 @@ bites on the first release build. iOS permits it via Expo's default `NSAllowsArb
 
 1. Client opens a session (`POST /api/recordings/session`) and streams **16 kHz mono PCM** over one WebSocket to the ASR sidecar in 100 ms binary frames. The sidecar owns VAD, segmentation and transcription; partial transcripts stream back for live captions.
 2. Every finalized segment is checkpointed with `POST /api/recordings/{id}/segments` and only then ACKed to the sidecar. Acked means durable in Astra. A dropped socket reconnects with a fresh ticket and re-sends everything un-acked; nothing the client captured is lost.
-3. On stop the client waits for the sidecar's final flush, finalizes the session, and the stitched transcript moves `uploaded → enriching → ready` through the same `/process` ticks below. Live sessions never re-run ASR.
+3. Independently, **every frame is also written to a crash-safe local file** (`walfly-recordings/<id>.wav`; OPFS on web). If the sidecar or the API is unreachable — or the app dies — the recording is delivered and transcribed from that file on a later launch (`streaming-plan.md` §11). Only server-confirmed deliveries delete it.
+4. On stop the client waits for the sidecar's final flush, delivers the local buffer, and the recording moves `uploaded → enriching → ready` through the same `/process` ticks below. The server keeps the streamed transcript when it is complete (small gaps, ≥95% coverage) and re-transcribes the file otherwise. Live sessions never re-run ASR unless the recovered file demands it.
 
 **File upload (secondary path):**
 
-4. `POST /api/recordings/upload` (multipart) sniffs the **magic bytes** — the client's filename and declared MIME are diagnostics only — stores the bytes, inserts the document with `status: "uploaded"`, and returns. **It starts no work.**
-5. The client POSTs `/api/recordings/{id}/process` repeatedly. Each tick advances the job by **exactly one step** — transcribe → enrich — under an expiring lease held in Astra, so nothing ever outlives a serverless function's budget and a mid-step crash is recoverable.
-6. Statuses are `uploaded → transcribing → enriching → ready` (file) or `uploaded → enriching → ready` (live), or `failed`.
-7. A transient error (network blip, Blob 500, ASR 5xx, LLM connection error) frees the lease, bumps an attempt counter and leaves the status alone so the next tick retries. Only a non-retryable error, or the 5th consecutive transient one, writes `failed`.
-8. If the app is backgrounded mid-job, the **Recordings tab** keeps ticking non-terminal rows on a timer while it is focused, honouring the server's own `retryAfterMs`.
+5. `POST /api/recordings/upload` (multipart) sniffs the **magic bytes** — the client's filename and declared MIME are diagnostics only — stores the bytes, inserts the document with `status: "uploaded"`, and returns. **It starts no work.**
+6. The client POSTs `/api/recordings/{id}/process` repeatedly. Each tick advances the job by **exactly one step** — transcribe → enrich — under an expiring lease held in Astra, so nothing ever outlives a serverless function's budget and a mid-step crash is recoverable.
+7. Statuses are `uploaded → transcribing → enriching → ready` (file) or `uploaded → enriching → ready` (live), or `failed`.
+8. A transient error (network blip, Blob 500, ASR 5xx, LLM connection error) frees the lease, bumps an attempt counter and leaves the status alone so the next tick retries. Only a non-retryable error, or the 5th consecutive transient one, writes `failed`.
+9. If the app is backgrounded mid-job, the **Recordings tab** keeps ticking non-terminal rows on a timer while it is focused, honouring the server's own `retryAfterMs`.
 
 ---
 

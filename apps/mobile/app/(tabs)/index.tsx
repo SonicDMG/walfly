@@ -175,6 +175,8 @@ export default function RecordScreen() {
               ? 'live transcription'
               : streamState === 'reconnecting'
               ? 'reconnecting — audio buffered'
+              : streamState === 'offline'
+              ? 'recording locally — syncs when online'
               : 'connecting…'}
           </Text>
         </View>

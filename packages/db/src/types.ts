@@ -49,6 +49,21 @@ export type RecordingStatus = 'recording' | 'uploaded' | 'transcribing' | 'enric
 
 export type PipelineStage = 'submit' | 'transcribe' | 'enrich' | 'done';
 
+/** Which artifact produced the durable transcript. Absent = legacy doc. */
+export type TranscriptSource = 'stream' | 'batch';
+
+/** Attach record for audio delivered from the client's local buffer. */
+export interface RecordingRecovery {
+  source: 'local-buffer';
+  attachedAt: string;          // ISO 8601; the idempotency signal
+  pathname: string;            // recordings/<id>.<ext>
+  bytes: number;
+  durationSec: number;
+  gapMs: number | null;        // client's estimate of audio the sidecar never consumed
+  attempts: number;            // /complete calls that touched the doc (diagnostic)
+  clientAttempts?: number;
+}
+
 export const NON_TERMINAL_STATUSES: readonly RecordingStatus[] = ['recording', 'uploaded', 'transcribing', 'enriching'];
 
 export interface Recording {
@@ -82,6 +97,10 @@ export interface Recording {
   receivedChunks?: number;
   /** Highest segment chunkIndex appended to `transcript` (live sessions only). */
   lastChunkIndex?: number;
+  /** Which artifact the durable transcript came from; absent on legacy docs. */
+  transcriptSource?: TranscriptSource;
+  /** Present when audio was delivered from the client's local buffer. */
+  recover?: RecordingRecovery;
   chunks?: RecordingChunk[];
   music?: MusicDetection;      // populated by per-chunk audio analysis and transcript detection
 }
@@ -98,6 +117,7 @@ export type PipelineRecord = Pick<
   Recording,
   '_id' | 'status' | 'audioUrl' | 'audioContentType' | 'doclingTaskId'
   | 'transcript' | 'leaseUntil' | 'submittedAt' | 'attempts' | 'isLiveSession' | 'music'
+  | 'transcriptSource'
 >;
 
 /** Fields a client may change. `placeName` maps to the nested location field. */

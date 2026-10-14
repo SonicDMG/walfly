@@ -15,7 +15,7 @@
 
 import { NextRequest, NextResponse } from 'next/server';
 import { advanceRecording } from '@/lib/pipeline';
-import type { PipelineStage, RecordingStatus } from '@walfly/db';
+import type { PipelineStage, RecordingStatus, TranscriptSource } from '@walfly/db';
 
 export const runtime = 'nodejs';
 export const maxDuration = 300; // Hobby maximum; Pro allows 800.
@@ -26,6 +26,8 @@ interface ProcessResponse {
   stage: PipelineStage;
   error: string | null;
   retryAfterMs: number;
+  /** 'stream' = sidecar segments, 'batch' = ASR over the stored file. */
+  transcriptSource: TranscriptSource | null;
 }
 
 export async function POST(
@@ -66,6 +68,7 @@ export async function POST(
     stage: result.stage,
     error: result.error,
     retryAfterMs: result.retryAfterMs,
+    transcriptSource: result.transcriptSource ?? null,
   });
 }
 

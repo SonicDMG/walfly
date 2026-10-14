@@ -51,6 +51,13 @@ import {
   type StreamConnectionState,
   type StreamSegment,
 } from '../lib/streamClient';
+import {
+  createLocalBuffer,
+  listPendingBuffers,
+  openExistingBuffer,
+  type LocalBuffer,
+} from '../lib/localBuffer';
+import { deliverLocalBuffer } from '../lib/recoverClient';
 
 const ACTIVE_SESSION_STORAGE_KEY = 'walfly_active_recording_session';
 
@@ -95,7 +102,7 @@ export function useRecordingUpload() {
   const [progress, setProgress] = useState(0);
   /** Growing live text: finalized segments plus the current partial. */
   const [liveTranscript, setLiveTranscript] = useState('');
-  const [streamState, setStreamState] = useState<StreamConnectionState | 'idle'>('idle');
+  const [streamState, setStreamState] = useState<StreamConnectionState | 'idle' | 'offline'>('idle');
 
   const mountedRef = useRef(true);
   const sessionIdRef = useRef<string | null>(null);
@@ -119,6 +126,14 @@ export function useRecordingUpload() {
   // True from the moment capture+stream are live until a stop is claimed;
   // drives the "sidecar ended the session" path.
   const recordingActiveRef = useRef(false);
+  // The crash-safe local copy of every frame (null when the platform cannot
+  // buffer; behaviour then falls back to the streaming-only path).
+  const bufferRef = useRef<LocalBuffer | null>(null);
+  // True while the live stream is detached (sidecar unreachable, or the server
+  // ended the session): capture continues and the buffer is the safety net.
+  const streamLostRef = useRef(false);
+  // Guards stopAndUpload against re-entry without losing the tail flush.
+  const stoppingRef = useRef(false);
 
   const { requestAndCapture } = useLocationPermission();
 
@@ -136,16 +151,88 @@ export function useRecordingUpload() {
     setLiveTranscript(text.length > LIVE_TRANSCRIPT_MAX_CHARS ? text.slice(-LIVE_TRANSCRIPT_MAX_CHARS) : text);
   }, []);
 
+  /**
+   * Opens one audio socket. Extracted so both the initial start and the
+   * server-ended path ("open a fresh server session and keep going") share it.
+   * Assigned every render to capture fresh closures.
+   */
+  const openClientRef = useRef<(sessionId: string, sampleRate: number) => Promise<AudioStreamClient>>(
+    async () => {
+      throw new Error('client factory not ready');
+    },
+  );
+  openClientRef.current = (sessionId: string, sampleRate: number) =>
+    AudioStreamClient.open({
+      sessionId,
+      sampleRate,
+      getTicket: () => fetchWsTicket(sessionId),
+      onPartial: (partial) => {
+        partialTextRef.current = partial.text;
+        publishLiveText();
+      },
+      onSegment: async (segment: StreamSegment) => {
+        await postSegment(sessionId, {
+          chunkIndex: segment.chunkIndex,
+          startMs: segment.startMs,
+          endMs: segment.endMs,
+          text: segment.text,
+        });
+        postedSegmentsRef.current += 1;
+        finalizedTextRef.current = `${finalizedTextRef.current} ${segment.text}`.trim();
+        partialTextRef.current = '';
+        publishLiveText();
+      },
+      onState: (next, detail) => {
+        if (next === 'live') streamLostRef.current = false;
+        if (mountedRef.current) setStreamState(next);
+        if (next === 'failed' && detail) {
+          console.warn(`[Stream] degraded: ${detail}`);
+        }
+      },
+      onGap: (fromMs, toMs) => {
+        console.warn(`[Stream] audio gap ${fromMs}–${toMs} ms`);
+      },
+      onEnded: () => {
+        // The sidecar ended the session by itself (idle timeout, capacity,
+        // max duration, deploy). Keep recording: the local buffer already
+        // holds the audio, and we try once to open a fresh server session so
+        // live transcription resumes. Everything already checkpointed is
+        // durable; nothing here may throw into the capture path.
+        console.warn('[Stream] the sidecar ended the session; continuing locally');
+        streamLostRef.current = true;
+        if (mountedRef.current) setStreamState('offline');
+        const previous = clientRef.current;
+        void (async () => {
+          try {
+            const replacement = await openClientRef.current(sessionId, sampleRate);
+            if (recordingActiveRef.current && clientRef.current === previous) {
+              clientRef.current = replacement;
+              streamLostRef.current = false;
+              if (mountedRef.current) setStreamState('live');
+            } else {
+              replacement.close();
+            }
+          } catch (err) {
+            console.warn('[Stream] could not re-attach; staying local:', err);
+          }
+        })();
+      },
+    });
+
   /** Single entry point for every captured frame, from either platform. */
   const handleFrameRef = useRef<(frame: Int16Array) => void>(() => undefined);
   handleFrameRef.current = (frame: Int16Array) => {
     const client = clientRef.current;
     if (client) {
       client.push(frame);
-      return;
+    } else {
+      const preroll = prerollRef.current;
+      if (preroll && preroll.length < PREROLL_MAX_FRAMES) preroll.push(frame);
     }
-    const preroll = prerollRef.current;
-    if (preroll && preroll.length < PREROLL_MAX_FRAMES) preroll.push(frame);
+    // Tee into the crash-safe local copy. Both consumers copy the frame before
+    // it can be reused, so the order here is not load-bearing; the cost is
+    // ~3.2 KB at 10 Hz and the call can never throw.
+    bufferRef.current?.append(frame);
   };
 
   const pushSamples = useCallback((push: (batcher: FrameBatcher) => void, sampleRate: number) => {
@@ -212,6 +299,14 @@ export function useRecordingUpload() {
     }
     batcherRef.current = null;
     prerollRef.current = null;
+    // The buffer is deliberately NOT discarded here: an unmount keeps the
+    // recording, and the launch sweep delivers it. Finalizing patches the WAV
+    // header and releases the exclusive file lock so a later sweep can open it.
+    const buffer = bufferRef.current;
+    bufferRef.current = null;
+    if (buffer) {
+      void buffer.finalize().catch(() => {});
+    }
   }, [nativeStream]);
 
   // ── crash recovery + teardown ─────────────────────────────────────────────
@@ -219,26 +314,36 @@ export function useRecordingUpload() {
   useEffect(() => {
     mountedRef.current = true;
 
-    // A session id left in storage means the app died mid-recording. Segments
-    // already checkpointed are durable; finalize flips the session so the
-    // pipeline can enrich whatever arrived.
-    if (typeof window !== 'undefined' && window.localStorage) {
+    // Crash recovery: deliver what the local buffers hold, then heal the legacy
+    // orphan marker. A buffer that cannot be delivered yet stays on disk and is
+    // retried on the next launch and on the next recorder reset.
+    void (async () => {
+      let pendingIds: string[] = [];
       try {
-        const orphanSessionId = window.localStorage.getItem(ACTIVE_SESSION_STORAGE_KEY);
-        if (orphanSessionId) {
-          console.log(`[Crash Recovery] Found orphaned session: ${orphanSessionId}. Finalizing...`);
-          void fetch(apiUrl(`/api/recordings/${encodeURIComponent(orphanSessionId)}/finalize`), {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({}),
-          }).finally(() => {
-            try {
-              window.localStorage.removeItem(ACTIVE_SESSION_STORAGE_KEY);
-            } catch {}
-          });
-        }
+        pendingIds = await listPendingBuffers();
       } catch {}
-    }
+      const delivered = new Set<string>();
+      for (const id of pendingIds) {
+        if (await deliverOneBuffer(id)) delivered.add(id);
+      }
+
+      if (typeof window !== 'undefined' && window.localStorage) {
+        try {
+          const orphanSessionId = window.localStorage.getItem(ACTIVE_SESSION_STORAGE_KEY);
+          const stillPending =
+            orphanSessionId !== null && pendingIds.includes(orphanSessionId) && !delivered.has(orphanSessionId);
+          if (orphanSessionId && !stillPending) {
+            console.log(`[Crash Recovery] Finalizing orphaned session ${orphanSessionId}`);
+            await fetch(apiUrl(`/api/recordings/${encodeURIComponent(orphanSessionId)}/finalize`), {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({}),
+            }).catch(() => {});
+            window.localStorage.removeItem(ACTIVE_SESSION_STORAGE_KEY);
+          }
+        } catch {}
+      }
+    })();
 
     return () => {
       mountedRef.current = false;
@@ -276,9 +381,23 @@ export function useRecordingUpload() {
 
       const startedAt = Date.now();
       startedAtRef.current = startedAt;
+      stoppingRef.current = false;
+      streamLostRef.current = false;
       prerollRef.current = [];
 
-      // 1. Start capture first so the real sample rate is known before hello.
+      // 1. The session id first: the server document and the local buffer share
+      //    it, which is what lets a later sweep join a crash's audio to its doc.
+      const sessionId = globalThis.crypto?.randomUUID
+        ? globalThis.crypto.randomUUID()
+        : `rec-${Date.now()}`;
+      sessionIdRef.current = sessionId;
+      if (typeof window !== 'undefined' && window.localStorage) {
+        try {
+          window.localStorage.setItem(ACTIVE_SESSION_STORAGE_KEY, sessionId);
+        } catch {}
+      }
+
+      // 2. Capture first so the real sample rate is known before hello.
       let sampleRate = 16000;
       if (Platform.OS === 'web') {
         webMicRef.current = await startWebMic({
@@ -292,17 +411,18 @@ export function useRecordingUpload() {
         sampleRate = nativeStream.stream.sampleRate || 16000;
       }
 
-      // 2. Session document, then a ticket for the audio socket.
-      const sessionId = globalThis.crypto?.randomUUID
-        ? globalThis.crypto.randomUUID()
-        : `rec-${Date.now()}`;
-      sessionIdRef.current = sessionId;
-      if (typeof window !== 'undefined' && window.localStorage) {
-        try {
-          window.localStorage.setItem(ACTIVE_SESSION_STORAGE_KEY, sessionId);
-        } catch {}
+      // 3. Crash-safe local buffer, created before anything else can fail: from
+      //    here on every frame lands on disk even if the sidecar or the API is
+      //    gone. If the platform cannot buffer, streaming alone still works.
+      let buffer: LocalBuffer | null = null;
+      try {
+        buffer = await createLocalBuffer(sessionId);
+      } catch (err) {
+        console.warn('[LocalBuffer] unavailable; streaming only:', err);
       }
+      bufferRef.current = buffer;
 
+      // 4. Session document.
       const sessionRes = await fetch(apiUrl('/api/recordings/session'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -312,57 +432,27 @@ export function useRecordingUpload() {
         throw new Error(`Could not start the recording session (${sessionRes.status})`);
       }
 
-      // 3. Location never delays the stream: patch it in when it resolves.
+      // 5. Location never delays the stream: patch it in when it resolves.
       void requestAndCapture().then((snapshot) => patchLocation(sessionId, snapshot));
 
-      // 4. Audio socket. Frames captured up to this point are flushed from the
-      //    pre-roll buffer once the handshake completes.
-      const client = await AudioStreamClient.open({
-        sessionId,
-        sampleRate,
-        getTicket: () => fetchWsTicket(sessionId),
-        onPartial: (partial) => {
-          partialTextRef.current = partial.text;
-          publishLiveText();
-        },
-        onSegment: async (segment: StreamSegment) => {
-          await postSegment(sessionId, {
-            chunkIndex: segment.chunkIndex,
-            startMs: segment.startMs,
-            endMs: segment.endMs,
-            text: segment.text,
-          });
-          postedSegmentsRef.current += 1;
-          finalizedTextRef.current = `${finalizedTextRef.current} ${segment.text}`.trim();
-          partialTextRef.current = '';
-          publishLiveText();
-        },
-        onState: (next, detail) => {
-          if (mountedRef.current) setStreamState(next);
-          if (next === 'failed' && detail) {
-            console.warn(`[Stream] degraded: ${detail}`);
-          }
-        },
-        onGap: (fromMs, toMs) => {
-          console.warn(`[Stream] audio gap ${fromMs}–${toMs} ms`);
-        },
-        onEnded: () => {
-          // The sidecar ended the session by itself (idle timeout, capacity,
-          // max duration). Everything checkpointed is durable; finalize and
-          // let the pipeline enrich it rather than reconnecting into a dead
-          // session. The user can simply record again.
-          console.warn('[Stream] the sidecar ended the session; finalizing');
-          if (recordingActiveRef.current) {
-            recordingActiveRef.current = false;
-            void stopRef.current();
-          }
-        },
-      });
+      // 6. Audio socket. Frames captured up to this point are flushed from the
+      //    pre-roll buffer once the handshake completes. When the sidecar is
+      //    unreachable and a local buffer exists, recording simply continues
+      //    locally and the buffer is delivered later.
+      let client: AudioStreamClient | null = null;
+      try {
+        client = await openClientRef.current(sessionId, sampleRate);
+      } catch (err) {
+        if (!buffer) throw err;
+        streamLostRef.current = true;
+        console.warn('[Stream] sidecar unreachable; recording locally:', err);
+      }
       clientRef.current = client;
+      if (mountedRef.current) setStreamState(client ? 'live' : 'offline');
 
       const preroll = prerollRef.current;
       prerollRef.current = null;
-      if (preroll) {
+      if (preroll && client) {
         for (const frame of preroll) client.push(frame);
       }
 
@@ -389,14 +479,18 @@ export function useRecordingUpload() {
   const stopAndUpload = useCallback(async () => {
     // Claimed synchronously: a double tap or the MAX_RECORDING_MS timer can
     // both land before React commits the 'uploading' state.
+    if (stoppingRef.current) return;
+    stoppingRef.current = true;
+    recordingActiveRef.current = false;
+
     const client = clientRef.current;
     const webMic = webMicRef.current;
     const wasNative = nativeActiveRef.current;
-    if (!client && !webMic && !wasNative) return;
-    clientRef.current = null;
-    webMicRef.current = null;
-    nativeActiveRef.current = false;
-    recordingActiveRef.current = false;
+    const buffer = bufferRef.current;
+    if (!client && !webMic && !wasNative) {
+      stoppingRef.current = false;
+      return;
+    }
 
     clearTimers();
 
@@ -407,7 +501,8 @@ export function useRecordingUpload() {
       const elapsed = Date.now() - startedAtRef.current;
       if (elapsed < MIN_RECORDING_MS) await sleep(MIN_RECORDING_MS - elapsed);
 
-      // Stop capture before the socket so the tail frame is enqueued first.
+      // Flush the tail while the refs still point at the live sinks, then stop
+      // capture and release everything.
       batcherRef.current?.flushPartial();
       batcherRef.current = null;
       if (webMic) webMic.stop();
@@ -418,27 +513,76 @@ export function useRecordingUpload() {
       }
       await releaseIosRecordSession();
 
+      clientRef.current = null;
+      webMicRef.current = null;
+      nativeActiveRef.current = false;
+      bufferRef.current = null;
+      prerollRef.current = null;
+
       const sessionId = sessionIdRef.current;
       if (!sessionId) {
         throw new Error('Recording session was not created — nothing to finalize.');
       }
       const durationSec = Math.max(1, Math.round((Date.now() - startedAtRef.current) / 1000));
+      const hasTranscript = postedSegmentsRef.current > 0;
 
       // `stop()` sends bye and waits for the sidecar's final flush; pending
       // segment checkpoints are drained inside.
       safeSetProgress(0.2);
       if (client) await client.stop();
 
-      safeSetProgress(0.3);
+      // Deliver the crash-safe local copy: always the audio archive, and the
+      // transcript source whenever the stream was incomplete or never attached
+      // (chooseTranscriptSource on the server decides which).
+      let delivered = false;
+      if (buffer) {
+        safeSetProgress(0.25);
+        try {
+          const file = await buffer.finalize();
+          if (file.bytes > 44 && file.durationSec >= 0.5) {
+            const gapMs = client ? (client.unackedFrames + client.droppedFrames) * 100 : null;
+            const result = await deliverLocalBuffer({
+              recordingId: sessionId,
+              buffer,
+              file,
+              gapMs,
+              prefer: 'auto',
+              createdAt: new Date(startedAtRef.current).toISOString(),
+            });
+            if (result.status === 'delivered' || result.status === 'already' || result.status === 'skipped') {
+              delivered = true;
+              await buffer.discard().catch(() => {});
+            } else {
+              console.warn(`[Recovery] delivery deferred (${result.error ?? 'unknown'}); buffer kept`);
+            }
+          } else {
+            await buffer.discard().catch(() => {});
+          }
+        } catch (err) {
+          console.warn('[Recovery] delivery failed; buffer kept:', err);
+        }
+      }
+
       const controller = new AbortController();
       abortRef.current = controller;
-      const finRes = await fetch(apiUrl(`/api/recordings/${encodeURIComponent(sessionId)}/finalize`), {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ duration: durationSec }),
-      });
-      if (!finRes.ok) {
-        throw new Error(`Session finalize failed (${finRes.status}): ${await readError(finRes)}`);
+
+      if (!delivered) {
+        if (!hasTranscript) {
+          // Nothing durable exists yet: do not finalize into an empty
+          // recording. The buffer stays on this device and the sweep retries.
+          throw new Error(
+            'Recording saved on this device — it will sync automatically when the connection returns.',
+          );
+        }
+        safeSetProgress(0.3);
+        const finRes = await fetch(apiUrl(`/api/recordings/${encodeURIComponent(sessionId)}/finalize`), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ duration: durationSec }),
+        });
+        if (!finRes.ok) {
+          throw new Error(`Session finalize failed (${finRes.status}): ${await readError(finRes)}`);
+        }
       }
 
       if (typeof window !== 'undefined' && window.localStorage) {
@@ -474,6 +618,7 @@ export function useRecordingUpload() {
       }
     } finally {
       abortRef.current = null;
+      stoppingRef.current = false;
     }
   }, [clearTimers, nativeStream, safeSetProgress, safeSetState]);
 
@@ -492,6 +637,8 @@ export function useRecordingUpload() {
     sessionIdRef.current = null;
     finalizedTextRef.current = '';
     partialTextRef.current = '';
+    // Retry any delivery that was deferred while offline.
+    void sweepPendingBuffers();
     if (!mountedRef.current) return;
     setState('idle');
     setError(null);
@@ -512,6 +659,62 @@ export function useRecordingUpload() {
     stopAndUpload,
     reset,
   };
+}
+
+// ─── Local-buffer sweep ──────────────────────────────────────────────────────
+// Deliver whatever a crash or an offline session left in the local buffer.
+// Only server-confirmed deliveries delete the buffer; everything else is left
+// for the next launch (or the next recorder reset).
+
+async function sweepPendingBuffers(): Promise<void> {
+  let ids: string[] = [];
+  try {
+    ids = await listPendingBuffers();
+  } catch (err) {
+    console.warn('[Recovery] could not list local buffers:', err);
+    return;
+  }
+  for (const id of ids) {
+    await deliverOneBuffer(id);
+  }
+}
+
+async function deliverOneBuffer(recordingId: string): Promise<boolean> {
+  try {
+    const buffer = await openExistingBuffer(recordingId);
+    const file = await buffer.finalize();
+    if (file.bytes <= 44 || file.durationSec < 0.5) {
+      // Header only — a start that never captured.
+      await buffer.discard().catch(() => {});
+      return true;
+    }
+    const result = await deliverLocalBuffer({
+      recordingId,
+      buffer,
+      file,
+      gapMs: null, // unknown after a crash: the server prefers the full file
+      prefer: 'auto',
+    });
+    if (result.status === 'delivered' || result.status === 'already' || result.status === 'skipped') {
+      await buffer.discard().catch(() => {});
+      void tickPipelineOnce(recordingId);
+      return true;
+    }
+    console.warn(`[Recovery] ${recordingId}: delivery deferred (${result.error ?? 'unknown'})`);
+    return false;
+  } catch (err) {
+    console.warn(`[Recovery] ${recordingId}: not deliverable yet:`, err);
+    return false;
+  }
+}
+
+/** A nudge; the Recordings list ticks non-terminal rows anyway. */
+async function tickPipelineOnce(recordingId: string): Promise<void> {
+  try {
+    await fetch(apiUrl(`/api/recordings/${encodeURIComponent(recordingId)}/process`), { method: 'POST' });
+  } catch {
+    // Best effort.
+  }
 }
 
 // ─── Audio session configuration ─────────────────────────────────────────────

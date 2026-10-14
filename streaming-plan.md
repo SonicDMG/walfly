@@ -8,8 +8,9 @@
 > tickets, `/segments` checkpointing, the streaming web/native client, and the
 > deletion of the old chunk pipeline. Verified locally end-to-end (real speech
 > through the sidecar; API session → ticket → segments → finalize → enrich
-> against Astra). Phase 2 (live rolling enrichment) and phase 3 (Bee ADTS,
-> fallback) are listed in §9.
+> against Astra). Phase 2 (live rolling enrichment) is still pending; phase 3
+> has begun with the local buffer fallback (§11, research in
+> `research_notes/Local buffer fallback/`).
 >
 > Research inputs: `research_notes/Streaming audio sidecar/01…04`. This document
 > is the decided design; the research notes hold the evidence and the
@@ -305,9 +306,55 @@ static "checkpoints" badge is replaced by real state).
   the final pass silently truncates recordings longer than ~45 min); UI cards.
 - **Phase 3 — optional**: Bee ADTS passthrough (`codec: "aac_adts"`, Python
   port of `AdtsFramer` + incremental PyAV decode; kept off this branch because
-  the Bee work is independent), local-capture fallback when the sidecar is
-  unreachable, Opus upgrade via WebCodecs, diarization post-pass, GPU/Groq
-  escalation.
+  the Bee work is independent), Opus upgrade via WebCodecs, diarization
+  post-pass, GPU/Groq escalation.
+- **Phase 3 (started) — local buffer fallback** (§11): the tee + recovery
+  upload are implemented on web and native; native direct-to-Blob upload and
+  the orphan-object ops sweep remain.
+
+## 11. Local buffer fallback (implemented)
+
+Every captured frame is also written to a crash-safe local file for the whole
+session — a down sidecar, a dead network, or an app crash never loses a
+recording. Reference teardown and evidence: `research_notes/Local buffer
+fallback/01…04`.
+
+- **Capture** (`apps/mobile/lib/localBuffer.ts`): web = OPFS through a worker
+  with a sync access handle (append + 1 Hz flush; `createWritable()` was ruled
+  out because its temp file is discarded when a tab dies). Native =
+  expo-file-system append handle, synchronous JSI writes. Both write a WAV: a
+  44-byte header reserved up front, PCM appended, header patched at finalize;
+  a torn tail from a kill is healed from the file size. The web worker file
+  lives at `apps/mobile/public/assets/audio/buffer-worker.js`.
+- **Delivery** (`apps/mobile/lib/recoverClient.ts` → routes in
+  `packages/api/app/api/recordings/[id]/recover/`): `GET /recover` is a
+  non-mutating probe; upload happens via Blob client-direct in blob mode
+  (`/recover/upload` is the `handleUpload` token exchange) or a whole-file POST
+  to `/recover/audio` in local mode; `POST /recover/complete` attaches and
+  decides. Idempotent end to end: deterministic pathname
+  (`recordings/<id>.<ext>`), a **status** compare-and-set on attach (Astra
+  refuses filters on denied paths, so `audioUrl` cannot be the guard, and
+  `recover.attachedAt` is read back so retries converge), and `alreadyAttached`
+  for duplicates.
+- **Transcript source** (`packages/api/lib/recoverPolicy.ts`,
+  `chooseTranscriptSource()`): chosen once at attach — keep the sidecar's
+  streamed transcript when the client-reported `gapMs ≤ 5 s` and streamed
+  coverage ≥ 95%, otherwise re-transcribe the whole file. The client may force
+  either (`prefer`); the server clamps. Audio is always archived; the pipeline
+  runs ASR when `!isLiveSession || transcriptSource === 'batch'`, and
+  `/process` reports `transcriptSource`.
+- **Failure behavior**: sidecar unreachable at start → recording begins in
+  local mode (UI: "recording locally — syncs when online"); the sidecar ends a
+  session mid-recording → the client keeps buffering and tries one fresh server
+  session. On stop, a failed delivery with no durable transcript deliberately
+  leaves the recording un-finalized: the buffer stays on the device and the
+  launch sweep (and the recorder reset) retries. Only server-confirmed
+  deliveries delete the file.
+- **Known limits**: native direct-to-Blob upload is not implemented yet (blob
+  mode on native keeps the buffer and retries; local/self-hosted mode works
+  fully); an interrupted upload restarts from the beginning after a reload
+  (bounded by the ~29 MB file); Blob objects whose app never returned are
+  residue for a not-yet-written ops sweep (`scripts/sweep-orphan-audio.mjs`).
 
 ## 10. Open questions
 

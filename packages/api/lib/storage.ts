@@ -16,8 +16,8 @@
  * pipeline identical in `next dev` and in production.
  */
 
-import { del, put } from '@vercel/blob';
-import { mkdir, readFile, unlink, writeFile } from 'fs/promises';
+import { del, head, put } from '@vercel/blob';
+import { mkdir, readFile, stat, unlink, writeFile } from 'fs/promises';
 import { resolve, sep } from 'path';
 
 export const LOCAL_AUDIO_URL_PREFIX = '/api/recordings/audio/';
@@ -171,6 +171,57 @@ export async function loadAudio(audioUrl: string): Promise<{ bytes: Uint8Array; 
   }
 
   throw new Error(`Unrecognised audioUrl form: ${audioUrl}`);
+}
+
+/**
+ * Looks up a stored object by its logical pathname without downloading it.
+ * Used by the recovery handshake to answer "are my bytes already there?";
+ * a missing object returns null rather than throwing, because absence is a
+ * normal state in that flow.
+ */
+export async function statStoredAudio(pathname: string): Promise<StoredAudio | null> {
+  if (process.env.BLOB_READ_WRITE_TOKEN) {
+    try {
+      const blob = await head(pathname, { abortSignal: AbortSignal.timeout(REMOTE_FETCH_TIMEOUT_MS) });
+      return { url: blob.url, contentType: blob.contentType, bytes: blob.size };
+    } catch (err) {
+      console.log(`[Vercel Blob] head(${pathname}) → missing (${err instanceof Error ? err.message : err})`);
+      return null;
+    }
+  }
+  if (process.env.VERCEL) return null;
+
+  const name = pathname.replace(/[^A-Za-z0-9._-]/g, '_');
+  const path = localAudioPath(name);
+  if (!path) return null;
+  try {
+    const info = await stat(path);
+    return {
+      url: `${LOCAL_AUDIO_URL_PREFIX}${encodeURIComponent(name)}`,
+      contentType: contentTypeForExtension(extensionOf(name)),
+      bytes: info.size,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/** Deletes a stored object by pathname — e.g. the loser of a duplicate delivery. */
+export async function deleteStoredAudio(pathname: string): Promise<void> {
+  if (process.env.BLOB_READ_WRITE_TOKEN) {
+    try {
+      await del(pathname, { abortSignal: AbortSignal.timeout(REMOTE_FETCH_TIMEOUT_MS) });
+    } catch (err) {
+      console.warn(`[Vercel Blob] deleteStoredAudio(${pathname}) failed:`, err);
+    }
+    return;
+  }
+  const name = pathname.replace(/[^A-Za-z0-9._-]/g, '_');
+  const path = localAudioPath(name);
+  if (!path) return;
+  await unlink(path).catch((err: NodeJS.ErrnoException) => {
+    if (err?.code !== 'ENOENT') throw err;
+  });
 }
 
 /** Removes the stored object. Handles both the Blob and the local-file case. */

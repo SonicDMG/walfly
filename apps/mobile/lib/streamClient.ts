@@ -97,6 +97,7 @@ export class AudioStreamClient {
   private _retryDelayMs = 500;
   private _stopping = false;
   private _stopped = false;
+  private _droppedFrames = 0;
   private _stopResolve: (() => void) | null = null;
   private _segmentsBase = 0;
   private _highestChunkIndex = -1;
@@ -118,6 +119,21 @@ export class AudioStreamClient {
     return this._buffer.size;
   }
 
+  /** Total audio frames captured this session. */
+  get capturedFrames(): number {
+    return this._seq;
+  }
+
+  /** Frames the sidecar has never consumed (unacked, including local drops). */
+  get unackedFrames(): number {
+    return Math.max(0, this._seq - (this._lastAudioAck + 1));
+  }
+
+  /** Frames thrown away because the local buffer overflowed during an outage. */
+  get droppedFrames(): number {
+    return this._droppedFrames;
+  }
+
   // ── capture side ─────────────────────────────────────────────────────────
 
   push(frame: Int16Array): void {
@@ -135,6 +151,7 @@ export class AudioStreamClient {
       const oldestKey = this._buffer.keys().next().value as number;
       const dropped = this._buffer.get(oldestKey);
       this._buffer.delete(oldestKey);
+      this._droppedFrames += 1;
       if (dropped) {
         const fromMs = new DataView(dropped.buffer, dropped.byteOffset).getUint32(4, true);
         this._options.onGap?.(fromMs, fromMs + 100);

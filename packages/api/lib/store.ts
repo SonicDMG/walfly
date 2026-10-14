@@ -19,8 +19,10 @@
 
 import type { EnrichResult } from '@/lib/enrich';
 import { mergeMusic } from '@/lib/music';
+import { chooseTranscriptSource, type RecoverPreference, type TranscriptSource } from '@/lib/recoverPolicy';
+import { statStoredAudio } from '@/lib/storage';
 import { formatSegmentLine } from '@/lib/transcript';
-import type { MusicDetection } from '@walfly/db';
+import type { MusicDetection, RecordingRecovery } from '@walfly/db';
 import {
   buildSearchTokens,
   buildVectorizeText,
@@ -238,6 +240,187 @@ export async function recordSegmentTranscript(
   return { receivedChunks };
 }
 
+export interface AttachRecoveredInput {
+  recordingId: string;
+  pathname: string;
+  bytes: number;
+  durationSec: number;
+  gapMs: number | null;
+  prefer: RecoverPreference;
+  /** Used only when the recording document is missing (case C3). */
+  createdAt?: string;
+  lat?: number | null;
+  lng?: number | null;
+  placeName?: string | null;
+  clientAttempts?: number;
+}
+
+export type AttachRecoveredResult =
+  | { result: 'attached' | 'alreadyAttached'; audioUrl: string; transcriptSource: TranscriptSource; status: string }
+  | { result: 'object_missing'; expected: number }
+  | { result: 'size_mismatch'; expected: number; actual: number }
+  | { result: 'audio_conflict'; audioUrl: string | null };
+
+/**
+ * Attaches audio delivered from the client's local buffer to its recording,
+ * idempotently, and decides how the durable transcript is produced.
+ *
+ * Authority: the object (deterministic pathname) plus a read-value CAS on
+ * `audioUrl` — the same pattern `recordSegmentTranscript` uses. Duplicate
+ * deliveries converge; whoever loses the CAS gets `alreadyAttached` or
+ * `audio_conflict` and never overwrites the winner.
+ *
+ * Recovery is a superset of /finalize: a `recording` doc that never finalized
+ * becomes `uploaded` here, with `transcriptSource` chosen once.
+ */
+export async function attachRecoveredAudio(input: AttachRecoveredInput): Promise<AttachRecoveredResult> {
+  const stored = await statStoredAudio(input.pathname);
+  if (!stored) return { result: 'object_missing', expected: input.bytes };
+  if (stored.bytes !== input.bytes) {
+    return { result: 'size_mismatch', expected: input.bytes, actual: stored.bytes };
+  }
+
+  const collection = getRecordingsV2Collection();
+  const nowIso = new Date().toISOString();
+  const recover: RecordingRecovery = {
+    source: 'local-buffer',
+    attachedAt: nowIso,
+    pathname: input.pathname,
+    bytes: stored.bytes,
+    durationSec: input.durationSec,
+    gapMs: input.gapMs,
+    attempts: 1,
+    ...(typeof input.clientAttempts === 'number' ? { clientAttempts: input.clientAttempts } : {}),
+  };
+
+  const doc = await collection.findOne(
+    { _id: input.recordingId },
+    {
+      projection: {
+        status: 1, audioUrl: 1, transcript: 1, receivedChunks: 1, duration: 1,
+        recover: 1, transcriptSource: 1,
+      },
+    },
+  );
+
+  if (!doc) {
+    // Case C3: no document to attach to — the local buffer is the only copy.
+    const source = chooseTranscriptSource({
+      stitched: null,
+      receivedChunks: 0,
+      gapMs: input.gapMs,
+      streamedDuration: 0,
+      localDuration: input.durationSec,
+      prefer: input.prefer,
+    });
+    const createdAt = input.createdAt ?? nowIso;
+    const hasCoords = typeof input.lat === 'number' && typeof input.lng === 'number';
+    const recoveredDoc: Recording = {
+      _id: input.recordingId,
+      title: clampIndexedString(`Recovered recording ${new Date(createdAt).toLocaleString()}`),
+      createdAt,
+      duration: input.durationSec,
+      audioUrl: stored.url,
+      audioContentType: stored.contentType,
+      location: {
+        coords: hasCoords ? { lat: input.lat as number, lng: input.lng as number } : null,
+        placeName: input.placeName ? clampIndexedString(input.placeName) : null,
+      },
+      status: 'uploaded',
+      doclingTaskId: null,
+      submittedAt: null,
+      leaseUntil: 0,
+      attempts: 0,
+      failedStage: null,
+      error: null,
+      transcript: null,
+      summary: null,
+      keyTakeaways: [],
+      actionItems: [],
+      speakers: [],
+      tags: [],
+      notes: '',
+      searchTokens: [],
+      transcriptSource: source,
+      recover,
+    };
+    console.log(`[Astra] inserting recovered recording ${input.recordingId} (${stored.bytes} bytes, source=${source})`);
+    await collection.insertOne(recoveredDoc);
+    return { result: 'attached', audioUrl: stored.url, transcriptSource: source, status: 'uploaded' };
+  }
+
+  const currentStatus = String(doc.status);
+  const currentSource = (doc.transcriptSource as TranscriptSource | undefined) ?? null;
+
+  if (doc.recover?.attachedAt) {
+    await collection.updateOne({ _id: input.recordingId }, { $inc: { 'recover.attempts': 1 } });
+    return {
+      result: 'alreadyAttached',
+      audioUrl: doc.audioUrl,
+      transcriptSource: currentSource ?? 'batch',
+      status: currentStatus,
+    };
+  }
+  if (currentStatus !== 'recording' && currentStatus !== 'uploaded') {
+    // The pipeline is already processing this doc; do not attach behind its back.
+    return {
+      result: 'alreadyAttached',
+      audioUrl: doc.audioUrl,
+      transcriptSource: currentSource ?? 'batch',
+      status: currentStatus,
+    };
+  }
+
+  const source = chooseTranscriptSource({
+    stitched: (doc.transcript as string | null) ?? null,
+    receivedChunks: typeof doc.receivedChunks === 'number' ? doc.receivedChunks : 0,
+    gapMs: input.gapMs,
+    streamedDuration: typeof doc.duration === 'number' ? doc.duration : 0,
+    localDuration: input.durationSec,
+    prefer: input.prefer,
+  });
+
+  // Compare-and-set on `status`, which is an indexed path — Astra refuses
+  // filters on denied paths like `audioUrl`, so the guard is "the status I
+  // read is still the status I write": a concurrent finalize/attach that
+  // moved it first makes this miss, and the re-read below reports the winner.
+  const cas = await collection.updateOne(
+    { _id: input.recordingId, status: currentStatus },
+    {
+      $set: {
+        audioUrl: stored.url,
+        audioContentType: stored.contentType,
+        duration: input.durationSec,
+        status: 'uploaded',
+        transcriptSource: source,
+        recover,
+        leaseUntil: 0,
+      },
+    },
+  );
+
+  if (cas.matchedCount === 1) {
+    console.log(`[Astra] ${input.recordingId} recovered audio attached (${stored.bytes} bytes, source=${source})`);
+    return { result: 'attached', audioUrl: stored.url, transcriptSource: source, status: 'uploaded' };
+  }
+
+  // Lost the race — re-read to see who won.
+  console.warn(`[Astra] ${input.recordingId}: recovery attach raced; deferring to the winner`);
+  const after = await collection.findOne(
+    { _id: input.recordingId },
+    { projection: { audioUrl: 1, recover: 1, transcriptSource: 1 } },
+  );
+  if (after?.recover?.attachedAt) {
+    return {
+      result: 'alreadyAttached',
+      audioUrl: after.audioUrl,
+      transcriptSource: (after.transcriptSource as TranscriptSource | undefined) ?? source,
+      status: 'uploaded',
+    };
+  }
+  return { result: 'audio_conflict', audioUrl: after?.audioUrl ?? null };
+}
+
 /** Inserts the initial document. The client kicks /process to advance it. */
 export async function createRecording(input: CreateRecordingInput): Promise<void> {
   const collection = getRecordingsV2Collection();
@@ -300,6 +483,7 @@ export async function getPipelineRecord(id: string): Promise<PipelineRecord | nu
         attempts: 1,
         isLiveSession: 1,
         music: 1,
+        transcriptSource: 1,
       },
     },
   );
@@ -322,6 +506,7 @@ export async function getPipelineRecord(id: string): Promise<PipelineRecord | nu
     attempts: typeof doc.attempts === 'number' ? doc.attempts : 0,
     isLiveSession: doc.isLiveSession ?? false,
     music: (doc.music as MusicDetection | undefined) ?? undefined,
+    transcriptSource: doc.transcriptSource ?? undefined,
   };
 }
 
