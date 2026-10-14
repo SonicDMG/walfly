@@ -1,22 +1,42 @@
-# fly.toml app configuration file for Walfly ASR Microservice
+# fly.toml app configuration file for Walfly ASR Microservice.
+#
+# Streaming notes (see streaming-plan.md §7):
+#  - one uvicorn process: in-memory sessions cannot span workers or machines
+#  - min_machines_running=1: the model is loaded at boot; a cold start would
+#    otherwise delay the first partial of a live session
+#  - auto_stop "stop" (not "suspend"): >2 GB machines are not recommended for
+#    suspend and snapshots are discarded on deploy
+#  - kill_timeout 60: drain in-flight segments on deploy (Fly's default is 5 s)
 app = "walfly-asr"
 primary_region = "iad"
 
 [build]
   dockerfile = "packages/api/sidecar/Dockerfile"
+  # Bump to large-v3-turbo when accuracy matters more than cost:
+  # [build.args]
+  #   ASR_MODEL = "large-v3-turbo"
 
 [env]
   PORT = "8888"
+  ASR_WORKERS = "2"
+  ASR_CPU_THREADS = "2"
 
 [http_service]
   internal_port = 8888
   force_https = true
-  auto_stop_machines = true
+  auto_stop_machines = "stop"
   auto_start_machines = true
-  min_machines_running = 0
+  min_machines_running = 1
   processes = ["app"]
+  kill_timeout = 60
+
+  # Load-balance and autostop on open WebSocket connections, not requests.
+  [http_service.concurrency]
+    type = "connections"
+    soft_limit = 4
+    hard_limit = 8
 
 [[vm]]
   cpu_kind = "shared"
-  cpus = 2
-  memory_mb = 2048
+  cpus = 4
+  memory_mb = 4096
