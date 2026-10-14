@@ -4,6 +4,13 @@
 > from `main`). Supersedes the client-chunked live-session design described in
 > `research_notes/Streaming audio sidecar/00 current live session flow map.md`.
 >
+> Phase 1 is implemented: sidecar streaming protocol + VAD/ASR loop, HMAC
+> tickets, `/segments` checkpointing, the streaming web/native client, and the
+> deletion of the old chunk pipeline. Verified locally end-to-end (real speech
+> through the sidecar; API session → ticket → segments → finalize → enrich
+> against Astra). Phase 2 (live rolling enrichment) and phase 3 (Bee ADTS,
+> fallback) are listed in §9.
+>
 > Research inputs: `research_notes/Streaming audio sidecar/01…04`. This document
 > is the decided design; the research notes hold the evidence and the
 > alternatives considered.
@@ -89,9 +96,9 @@ Server → client:
 
 ```jsonc
 { "t": "ready", "sessionId": "…", "sampleRate": 16000, "codec": "pcm_s16le",
-  "resumedFromSeq": 412 }
+  "resumedFromSeq": 412, "reset": true }
 { "t": "partial", "revision": 7, "tEnd": 18.4, "text": "…" }   // grows only
-{ "t": "segment", "seq": 7, "chunkIndex": 7, "start": 12.1, "end": 18.4,
+{ "t": "segment", "seq": 7, "start": 12.1, "end": 18.4,
   "text": "…", "avgLogprob": -0.31 }
 { "t": "ack", "seq": 431 }                  // server ack of received audio frames
 { "t": "flow", "lagMs": 15200, "limitMs": 30000 }   // backpressure advisory
@@ -108,11 +115,15 @@ Rules:
 - `partial` streams only the committed prefix (LA-2) — it never shrinks within
   a revision; drop out-of-order revisions client-side.
 - `segment` finals are immutable and strictly ordered by `seq`.
+- `seq` is server-local; the **client assigns the recording-global `chunkIndex`**
+  (`chunkIndexBase + seq`) before checkpointing, and bumps the base when `ready`
+  carries `reset: true` — segment documents can then never collide across
+  sidecar restarts.
 - Resume: after reconnect, `hello.resume.fromSeq = lastAckedSeq + 1`; the server
   replays unacked segments (`seq > lastAckedSeq`) from its ring, then continues.
   If the session is unknown (different machine, TTL expired) the server emits
-  `ready` with `reset: true`; the client derives its next `chunkIndex` from
-  locally persisted state and continues — a gap in audio, never a crash.
+  `ready` with `reset: true`; the client bumps its base and continues — a gap in
+  audio, never a crash.
 - Backpressure: client counts **ack-lag** (oldest unacked frame). > 5 s: stop
   enqueueing, mark a local gap. Server high-water at 15 s sends `flow`; at 30 s
   it drops oldest audio and emits `gap`; at 60 s it closes 1013.

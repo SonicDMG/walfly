@@ -87,7 +87,6 @@ async def run(args: argparse.Namespace) -> int:
             "codec": "pcm_s16le",
             "sampleRate": 16000,
             "channels": 1,
-            "chunkIndexBase": 0,
         }))
 
         async def reader() -> None:

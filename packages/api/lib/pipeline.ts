@@ -81,13 +81,16 @@ export async function advanceRecording(id: string): Promise<AdvanceResult> {
     // ---- uploaded → transcribe or transition live session to enrich ------
     if (record.status === 'uploaded') {
       stage = 'transcribe';
-      if (!(await acquireLease(id, 'uploaded', LEASE_TRANSCRIBE_MS))) {
-        return waiting(id, 'uploaded', 'transcribe', 2000);
-      }
 
-      // If this was a live session, chunks have already been transcribed incrementally.
+      // A live session streamed its transcript through the sidecar: the
+      // segments are already durable in Astra, so there is no ASR step and
+      // nothing to lease. Only file-backed recordings run (and lease) the
+      // transcriber.
       let markdown = record.transcript;
       if (!record.isLiveSession) {
+        if (!(await acquireLease(id, 'uploaded', LEASE_TRANSCRIBE_MS))) {
+          return waiting(id, 'uploaded', 'transcribe', 2000);
+        }
         markdown = await transcribeAudio(record.audioUrl);
       }
 
@@ -193,6 +196,13 @@ function isRetryable(err: unknown): boolean {
 
   // LLM returned malformed JSON — model misfire, worth retrying.
   if (err.message.includes('LLM enrichment returned unparseable JSON')) return true;
+
+  // The OpenAI SDK wraps network failures as APIConnectionError /
+  // APIConnectionTimeoutError ("Connection error."). The LLM proxy is often the
+  // flakiest hop, and the lease already bounds the retry cost — treat these like
+  // the socket errors below instead of failing the recording terminally.
+  if (/APIConnection|Connection|Timeout/i.test(err.name)) return true;
+  if (/Connection error/i.test(err.message)) return true;
 
   // AbortSignal.timeout, undici socket errors, and the Astra driver's own
   // timeout/http wrappers all surface as one of these.

@@ -75,7 +75,6 @@ def make_session(**overrides) -> tuple[StreamSession, list[dict], FakeTranscribe
         settings=settings,
         pool=transcriber,
         vad_factory=FakeVad,
-        chunk_index_base=100,
     )
     session.set_sink(collected.append)
     return session, collected, transcriber
@@ -114,7 +113,7 @@ def test_happy_path_partial_segment_ack_final():
 
     segment = wait_for(lambda: (of_type(collected, "segment") or [None])[0])
     assert segment is not None, collected
-    assert segment["chunkIndex"] == 100 + segment["seq"]
+    assert "seq" in segment and "chunkIndex" not in segment  # chunkIndex is client-side
     assert segment["end"] > segment["start"] > 0.0
     assert "final" in segment["text"]
 
@@ -143,7 +142,7 @@ def test_suspect_final_is_dropped_but_sequence_progresses():
     transcriber = FakeTranscriber(final_text="Thanks for watching!")
     collected: list[dict] = []
     session = StreamSession(session_id="s", settings=settings, pool=transcriber,
-                            vad_factory=FakeVad, chunk_index_base=0)
+                            vad_factory=FakeVad)
     session.set_sink(collected.append)
     session.start()
     seq = feed(session, speech=False, seconds=0.3, start_seq=0)

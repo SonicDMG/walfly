@@ -84,6 +84,7 @@ export interface Recording {
   checkpointSeq?: number;
   totalExpectedChunks?: number;
   receivedChunks?: number;
+  lastChunkIndex?: number;
   chunks?: RecordingChunk[];
   music?: MusicDetection;
 }
@@ -110,6 +111,9 @@ export interface RecordingPatch {
   tags?: string[];
   notes?: string;
   placeName?: string;
+  /** Live sessions patch coordinates in when the location resolves late. */
+  lat?: number;
+  lng?: number;
 }
 
 /** GET /api/recordings/upload */

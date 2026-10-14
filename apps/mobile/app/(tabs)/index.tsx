@@ -31,7 +31,7 @@ import { colors, fonts, fontSizes, spacing, shadow } from '../../lib/theme';
 const BUSY_STATES = new Set<RecordState>(['uploading', 'processing', 'requesting']);
 
 export default function RecordScreen() {
-  const { state, error, progress, startRecording, stopAndUpload, reset } =
+  const { state, error, progress, liveTranscript, streamState, startRecording, stopAndUpload, reset } =
     useRecordingUpload();
   const insets = useSafeAreaInsets();
 
@@ -156,11 +156,36 @@ export default function RecordScreen() {
         </Pressable>
       </View>
 
-      {/* Live sync & Checkpoint indicators */}
+      {/* Live streaming status */}
       {isRecording && (
         <View style={styles.checkpointBox}>
-          <Ionicons name="cloud-upload-outline" size={16} color={colors.amber} />
-          <Text style={styles.checkpointText}>streaming audio checkpoints</Text>
+          <Ionicons
+            name={
+              streamState === 'live'
+                ? 'radio-outline'
+                : streamState === 'reconnecting'
+                ? 'cloud-offline-outline'
+                : 'cloud-upload-outline'
+            }
+            size={16}
+            color={streamState === 'live' ? colors.success : colors.amber}
+          />
+          <Text style={styles.checkpointText}>
+            {streamState === 'live'
+              ? 'live transcription'
+              : streamState === 'reconnecting'
+              ? 'reconnecting — audio buffered'
+              : 'connecting…'}
+          </Text>
+        </View>
+      )}
+
+      {/* Growing live captions from the sidecar's partials */}
+      {isRecording && liveTranscript.length > 0 && (
+        <View style={styles.liveTranscriptBox}>
+          <Text style={styles.liveTranscriptText} numberOfLines={3}>
+            {liveTranscript}
+          </Text>
         </View>
       )}
 
@@ -284,5 +309,19 @@ const styles = StyleSheet.create({
     fontFamily: fonts.body,
     fontSize: fontSizes.xs,
     color: colors.mist,
+  },
+  liveTranscriptBox: {
+    maxWidth: 320,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm,
+    borderRadius: 12,
+    backgroundColor: colors.charcoal,
+  },
+  liveTranscriptText: {
+    fontFamily: fonts.body,
+    fontSize: fontSizes.sm,
+    color: colors.cream,
+    textAlign: 'center',
+    lineHeight: 20,
   },
 });

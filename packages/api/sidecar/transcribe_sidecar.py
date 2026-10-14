@@ -200,10 +200,10 @@ async def stream(websocket: WebSocket) -> None:
             resume_from = int(resume["fromSeq"])
     except (TypeError, ValueError):
         resume_from = -1
-    chunk_index_base = int(hello.get("chunkIndexBase") or 0)
 
     # ── session ─────────────────────────────────────────────────────────────
     session_id = ticket.session_id
+    reset = False
     async with _sessions_lock:
         existing = _sessions.get(session_id)
         if existing is not None and existing.attached:
@@ -217,11 +217,11 @@ async def stream(websocket: WebSocket) -> None:
                 session_id=session_id,
                 settings=settings,
                 pool=pool,
-                chunk_index_base=chunk_index_base,
             )
             _sessions[session_id] = existing
             _counters["sessions_total"] += 1
             existing.start()
+            reset = resume_from >= 0
     session = existing
 
     outbox: "asyncio.Queue[dict | None]" = asyncio.Queue()
@@ -237,6 +237,7 @@ async def stream(websocket: WebSocket) -> None:
     await websocket.send_text(protocol.dumps(protocol.ready(
         session_id, sample_rate=settings.sample_rate,
         resumed_from_seq=resume_from if resume_from >= 0 else None,
+        reset=reset,
     )))
     if resume_from >= 0:
         session.replay(resume_from)

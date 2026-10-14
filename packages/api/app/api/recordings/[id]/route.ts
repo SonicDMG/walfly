@@ -139,6 +139,21 @@ export async function PATCH(req: NextRequest, { params }: RouteParams) {
     $set['location.placeName'] = placeName;
   }
 
+  // Live sessions resolve their location after capture starts and patch the
+  // coordinates in when they arrive.
+  if ('lat' in body || 'lng' in body) {
+    const lat = body.lat;
+    const lng = body.lng;
+    if (
+      typeof lat !== 'number' || typeof lng !== 'number' ||
+      !Number.isFinite(lat) || !Number.isFinite(lng) ||
+      Math.abs(lat) > 90 || Math.abs(lng) > 180
+    ) {
+      return NextResponse.json({ error: '`lat`/`lng` must be valid coordinates' }, { status: 400 });
+    }
+    $set['location.coords'] = { lat, lng };
+  }
+
   if (Object.keys($set).length === 0) {
     return NextResponse.json({ error: 'No patchable fields provided' }, { status: 400 });
   }

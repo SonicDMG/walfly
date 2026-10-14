@@ -19,6 +19,7 @@
 
 import type { EnrichResult } from '@/lib/enrich';
 import { mergeMusic } from '@/lib/music';
+import { formatSegmentLine } from '@/lib/transcript';
 import type { MusicDetection } from '@walfly/db';
 import {
   buildSearchTokens,
@@ -29,7 +30,6 @@ import {
   getCollectionCapabilities,
   getRecordingsV2Collection,
   ensureRecordingChunksV2Collection,
-  getRecordingChunksV2Collection,
 } from '@walfly/db';
 import type { PipelineRecord, PipelineStage, Recording, RecordingStatus } from '@walfly/db';
 
@@ -129,73 +129,100 @@ export async function finalizeLiveSession(
   }
 }
 
-export interface AppendChunkInput {
+export interface AppendSegmentInput {
   recordingId: string;
   chunkIndex: number;
-  duration: number;
-  offsetMs: number;
-  transcript?: string;
-  deletedAt?: string;
-  silent?: boolean;
+  startMs: number;
+  endMs: number;
+  text: string;
 }
 
 /**
- * Persists a chunk as an independent document in `recording_chunks` collection
- * (preventing Astra 1,000 array elements & 5,000 document property limits for all-day sessions)
- * and updates the parent recording's monotonic stitched transcript.
+ * Persists one finalized streaming segment (a sidecar `segment` event) as an
+ * independent document in `recording_chunks_v2` — the same write-ahead log the
+ * pipeline always used, now fed by the sidecar instead of client chunk uploads —
+ * and updates the parent recording's stitched transcript.
+ *
+ * The client ACKs a segment only after this write succeeds, and posts are
+ * serialized per recording, so the parent append is optimistic (one read, one
+ * write). Any index mismatch (a retry, a replay after reconnect, a lost ack)
+ * falls back to a full re-stitch from the segment log, which makes the whole
+ * path idempotent.
  */
-export async function recordChunkTranscript(input: AppendChunkInput): Promise<void> {
+export async function recordSegmentTranscript(
+  input: AppendSegmentInput,
+): Promise<{ receivedChunks: number }> {
   const recordingsCollection = getRecordingsV2Collection();
-  const chunksCollection = await ensureRecordingChunksV2Collection();
+  const segmentsCollection = await ensureRecordingChunksV2Collection();
 
-  const doc = await recordingsCollection.findOne({ _id: input.recordingId });
+  const doc = await recordingsCollection.findOne(
+    { _id: input.recordingId },
+    { projection: { transcript: 1, lastChunkIndex: 1, receivedChunks: 1 } },
+  );
   if (!doc) {
     throw new Error(`Recording ${input.recordingId} not found`);
   }
 
-  const clampedTranscript = clampUtf8Bytes(input.transcript || '');
-  const chunkId = `${input.recordingId}_chunk_${String(input.chunkIndex).padStart(6, '0')}`;
+  const segmentId = `${input.recordingId}_chunk_${String(input.chunkIndex).padStart(6, '0')}`;
+  const line = clampUtf8Bytes(formatSegmentLine(input.startMs, input.endMs, input.text));
 
-  // 1. Upsert chunk document in recording_chunks_v2 (no $vectorize — pure write-ahead log)
-  await chunksCollection.updateOne(
-    { _id: chunkId },
+  // 1. Upsert the segment document (no $vectorize — pure write-ahead log).
+  await segmentsCollection.updateOne(
+    { _id: segmentId },
     {
       $set: {
         recordingId: input.recordingId,
         chunkIndex: input.chunkIndex,
-        duration: input.duration,
-        offsetMs: input.offsetMs,
+        duration: Math.max(0, (input.endMs - input.startMs) / 1000),
+        offsetMs: input.startMs,
+        startMs: input.startMs,
+        endMs: input.endMs,
         status: 'transcribed' as const,
-        transcript: clampedTranscript,
-        deletedAt: input.deletedAt || new Date().toISOString(),
-        silent: input.silent ?? false,
+        transcript: line,
+        deletedAt: new Date().toISOString(),
+        silent: false,
       },
     },
     { upsert: true },
   );
 
-  // 2. Fetch all recorded chunks from recording_chunks_v2 and stitch transcript deterministically
-  const chunksCursor = chunksCollection.find(
-    { recordingId: input.recordingId },
-    { sort: { chunkIndex: 1 } },
-  );
-  const allRecordedChunks = await chunksCursor.toArray();
+  // 2. Append to the parent transcript (or rebuild when the index does not
+  //    line up with the last recorded one).
+  const previousTranscript = (doc.transcript as string | null | undefined) ?? '';
+  const previousLast = typeof doc.lastChunkIndex === 'number' ? doc.lastChunkIndex : -1;
+  const previousCount = typeof doc.receivedChunks === 'number' ? doc.receivedChunks : 0;
 
-  const stitchedTranscript = allRecordedChunks
-    .map((c) => c.transcript)
-    .filter(Boolean)
-    .join('\n\n');
+  let transcript: string;
+  let receivedChunks: number;
+  let lastChunkIndex: number;
 
-  // 3. Update parent recording document without storing unbounded chunk arrays
+  if (previousLast + 1 === input.chunkIndex) {
+    transcript = previousTranscript ? `${previousTranscript}\n\n${line}` : line;
+    receivedChunks = previousCount + 1;
+    lastChunkIndex = input.chunkIndex;
+  } else {
+    const cursor = segmentsCollection.find(
+      { recordingId: input.recordingId },
+      { sort: { chunkIndex: 1 } },
+    );
+    const allSegments = await cursor.toArray();
+    transcript = allSegments
+      .map((segment) => segment.transcript)
+      .filter(Boolean)
+      .join('\n\n');
+    receivedChunks = allSegments.length;
+    lastChunkIndex = allSegments.reduce(
+      (max, segment) => Math.max(max, typeof segment.chunkIndex === 'number' ? segment.chunkIndex : -1),
+      -1,
+    );
+  }
+
   await recordingsCollection.updateOne(
     { _id: input.recordingId },
-    {
-      $set: {
-        receivedChunks: allRecordedChunks.length,
-        transcript: stitchedTranscript,
-      },
-    },
+    { $set: { transcript, receivedChunks, lastChunkIndex } },
   );
+
+  return { receivedChunks };
 }
 
 /** Inserts the initial document. The client kicks /process to advance it. */
@@ -309,38 +336,9 @@ export async function acquireLease(
   return acquired;
 }
 
-/** Frees the lease so the next tick can pick the job up immediately. */
-export async function releaseLease(id: string): Promise<void> {
-  const collection = getRecordingsV2Collection();
-  await collection.updateOne({ _id: id }, { $set: { leaseUntil: 0 } });
-}
-
-/** uploaded → transcribing. Persists the task id before any polling happens. */
-export async function storeDoclingTaskId(id: string, taskId: string): Promise<void> {
-  const collection = getRecordingsV2Collection();
-
-  const result = await collection.updateOne(
-    { _id: id },
-    {
-      $set: {
-        doclingTaskId: taskId,
-        status: 'transcribing',
-        submittedAt: Date.now(),
-        leaseUntil: 0,
-        attempts: 0,
-      },
-    },
-  );
-
-  if (result.matchedCount === 0) {
-    throw new Error(`Recording ${id} disappeared before the Docling task id could be stored`);
-  }
-}
-
 /**
- * transcribing → enriching. The Docling result endpoint is single-use, so this
- * must succeed in the same request that fetched the transcript — hence the
- * throw on a missed match rather than a silent no-op.
+ * transcribing → enriching. Persists the transcript before enrichment so a
+ * crash after this point never re-runs ASR.
  */
 export async function storeTranscript(id: string, transcript: string): Promise<void> {
   const collection = getRecordingsV2Collection();

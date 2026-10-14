@@ -29,7 +29,8 @@ def dumps(message: dict) -> str:
     return json.dumps(message, separators=(",", ":"))
 
 
-def ready(session_id: str, *, sample_rate: int, resumed_from_seq: int | None = None) -> dict:
+def ready(session_id: str, *, sample_rate: int, resumed_from_seq: int | None = None,
+          reset: bool = False) -> dict:
     message = {
         "t": "ready",
         "sessionId": session_id,
@@ -38,6 +39,10 @@ def ready(session_id: str, *, sample_rate: int, resumed_from_seq: int | None = N
     }
     if resumed_from_seq is not None:
         message["resumedFromSeq"] = resumed_from_seq
+    if reset:
+        # The server has no memory of this session (restart / TTL expiry): the
+        # client continues its own chunk numbering from where it left off.
+        message["reset"] = True
     return message
 
 
@@ -45,12 +50,13 @@ def partial(revision: int, t_end: float, text: str) -> dict:
     return {"t": "partial", "revision": revision, "tEnd": round(t_end, 3), "text": text}
 
 
-def segment(seq: int, chunk_index: int, start_s: float, end_s: float, text: str,
+def segment(seq: int, start_s: float, end_s: float, text: str,
             avg_logprob: float | None = None) -> dict:
+    """One finalized segment. `seq` is server-local; the client maps it onto the
+    recording's global chunkIndex so reconnects to a fresh server never collide."""
     message = {
         "t": "segment",
         "seq": seq,
-        "chunkIndex": chunk_index,
         "start": round(start_s, 3),
         "end": round(end_s, 3),
         "text": text,

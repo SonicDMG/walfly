@@ -80,6 +80,8 @@ export interface Recording {
   checkpointSeq?: number;
   totalExpectedChunks?: number;
   receivedChunks?: number;
+  /** Highest segment chunkIndex appended to `transcript` (live sessions only). */
+  lastChunkIndex?: number;
   chunks?: RecordingChunk[];
   music?: MusicDetection;      // populated by per-chunk audio analysis and transcript detection
 }
@@ -104,4 +106,7 @@ export interface RecordingPatch {
   tags?: string[];
   notes?: string;
   placeName?: string;
+  /** Live sessions patch coordinates in when the location resolves late. */
+  lat?: number;
+  lng?: number;
 }

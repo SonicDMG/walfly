@@ -61,13 +61,11 @@ class StreamSession:
         settings: Settings,
         pool: Transcriber,
         vad_factory: Callable[[], object] | None = None,
-        chunk_index_base: int = 0,
         vad_config=None,
     ) -> None:
         self.session_id = session_id
         self._settings = settings
         self._pool = pool
-        self._chunk_index_base = int(chunk_index_base)
         self._vad_config = vad_config
         self._vad_factory = vad_factory or (lambda: SileroVadStream())
 
@@ -460,7 +458,6 @@ class StreamSession:
             return
         message = protocol.segment(
             seq=job.seq,
-            chunk_index=self._chunk_index_base + job.seq,
             start_s=job.window_start_s,
             end_s=max(job.window_start_s, job.window_start_s + len(job.audio) / self._settings.sample_rate),
             text=text,
