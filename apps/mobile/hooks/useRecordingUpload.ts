@@ -311,6 +311,14 @@ export function useRecordingUpload() {
 
   // ── crash recovery + teardown ─────────────────────────────────────────────
 
+  // `teardownCapture` changes identity on every render on web (useAudioStream
+  // returns a fresh object each time), so the mount effect below must not list
+  // it as a dependency: doing so re-ran the effect on every render, which tore
+  // down the live recording and "recovered" (finalized) the session that was
+  // still being recorded. Read it through a ref instead.
+  const teardownCaptureRef = useRef(teardownCapture);
+  teardownCaptureRef.current = teardownCapture;
+
   useEffect(() => {
     mountedRef.current = true;
 
@@ -332,7 +340,9 @@ export function useRecordingUpload() {
           const orphanSessionId = window.localStorage.getItem(ACTIVE_SESSION_STORAGE_KEY);
           const stillPending =
             orphanSessionId !== null && pendingIds.includes(orphanSessionId) && !delivered.has(orphanSessionId);
-          if (orphanSessionId && !stillPending) {
+          // Never "recover" the session this very hook is recording right now.
+          const isCurrentSession = orphanSessionId !== null && orphanSessionId === sessionIdRef.current;
+          if (orphanSessionId && !stillPending && !isCurrentSession) {
             console.log(`[Crash Recovery] Finalizing orphaned session ${orphanSessionId}`);
             await fetch(apiUrl(`/api/recordings/${encodeURIComponent(orphanSessionId)}/finalize`), {
               method: 'POST',
@@ -350,9 +360,11 @@ export function useRecordingUpload() {
       clearTimers();
       abortRef.current?.abort();
       abortRef.current = null;
-      void teardownCapture().then(releaseIosRecordSession);
+      void teardownCaptureRef.current().then(releaseIosRecordSession);
     };
-  }, [clearTimers, teardownCapture]);
+    // Mount/unmount only — see teardownCaptureRef above.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // ── start ─────────────────────────────────────────────────────────────────
 
