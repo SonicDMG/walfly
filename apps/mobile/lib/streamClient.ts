@@ -206,21 +206,35 @@ export class AudioStreamClient {
 
   private async _connect(initial: boolean): Promise<void> {
     this._setState(initial ? 'connecting' : 'reconnecting');
+    const tag = `[Stream ${this._options.sessionId.slice(0, 8)}]`;
+    console.log(`${tag} ${initial ? 'connecting' : 'reconnecting'}: requesting ws ticket`);
     let ticket: StreamTicketResponse;
     try {
       ticket = await this._options.getTicket();
     } catch (err) {
+      console.error(`${tag} ws ticket request failed:`, err);
       this._setState('failed', err instanceof Error ? err.message : 'ticket request failed');
+      if (initial) {
+        // Surface the real cause to the caller instead of silently retrying
+        // forever behind a promise that already resolved.
+        this._clearTimers();
+        throw err instanceof Error ? err : new Error(String(err));
+      }
       this._scheduleReconnect();
       return;
     }
 
+    console.log(`${tag} opening WebSocket ${ticket.url} (ticket expires ${new Date(ticket.expiresAt).toISOString()})`);
     const ws = new WebSocket(ticket.url, [PROTOCOL_NAME, `ticket.${ticket.ticket}`]) as unknown as WsLike;
     this._ws = ws;
 
     const ready = new Promise<void>((resolve, reject) => {
-      const timeout = setTimeout(() => reject(new Error('sidecar handshake timed out')), HELLO_TIMEOUT_MS);
+      const timeout = setTimeout(() => {
+        console.error(`${tag} no 'ready' from sidecar within ${HELLO_TIMEOUT_MS} ms (url=${ticket.url})`);
+        reject(new Error(`sidecar handshake timed out after ${HELLO_TIMEOUT_MS} ms (${ticket.url})`));
+      }, HELLO_TIMEOUT_MS);
       ws.onopen = () => {
+        console.log(`${tag} socket open; sending hello (rate=${this._options.sampleRate})`);
         this._send({
           t: 'hello',
           sessionId: this._options.sessionId,
@@ -236,6 +250,7 @@ export class AudioStreamClient {
         if (!message) return;
         this._lastMessageAt = Date.now();
         if (message.t === 'ready') {
+          console.log(`${tag} sidecar ready`, message);
           clearTimeout(timeout);
           if (message.reset) {
             // The sidecar lost the session (restart / expired): continue the
@@ -246,6 +261,7 @@ export class AudioStreamClient {
           return;
         }
         if (message.t === 'error') {
+          console.error(`${tag} sidecar sent error:`, message);
           clearTimeout(timeout);
           this._setState('failed', typeof message.message === 'string' ? message.message : 'sidecar error');
           if (initial) reject(new Error(String(message.message ?? 'sidecar error')));
@@ -253,12 +269,20 @@ export class AudioStreamClient {
         }
         this._handleMessage(message);
       };
-      ws.onerror = () => {
-        // onclose follows; nothing to do here beyond unblocking the handshake.
+      ws.onerror = (event) => {
+        // Browsers hide the reason for security; onclose carries the code.
+        console.error(`${tag} socket error (url=${ticket.url}) — is the sidecar reachable from this device?`, event);
       };
-      ws.onclose = () => {
+      ws.onclose = (event) => {
+        const ev = event as { code?: number; reason?: string; wasClean?: boolean };
+        console.warn(
+          `${tag} socket closed code=${ev?.code ?? '?'} reason=${JSON.stringify(ev?.reason ?? '')} ` +
+            `clean=${ev?.wasClean ?? '?'} stopping=${this._stopping || this._stopped}`,
+        );
         clearTimeout(timeout);
-        rejectOnce(new Error('socket closed before ready'));
+        rejectOnce(
+          new Error(`socket closed before ready (code ${ev?.code ?? '?'}${ev?.reason ? `: ${ev.reason}` : ''}) — ${ticket.url}`),
+        );
         if (!this._stopped && !this._stopping) this._scheduleReconnect();
       };
       let rejected = false;
@@ -273,6 +297,7 @@ export class AudioStreamClient {
     try {
       await ready;
     } catch (err) {
+      console.error(`${tag} handshake failed:`, err);
       this._closeSocket();
       if (initial) {
         this._clearTimers();
@@ -283,6 +308,7 @@ export class AudioStreamClient {
     }
 
     // Handshake done — resume: re-send everything un-acked.
+    console.log(`${tag} live; re-sending ${this._buffer.size} buffered frame(s)`);
     this._state = 'live';
     this._retryDelayMs = 500;
     for (const [seq, bytes] of this._buffer) {
@@ -358,19 +384,23 @@ export class AudioStreamClient {
       ...(typeof message.avgLogprob === 'number' ? { avgLogprob: message.avgLogprob } : {}),
     };
 
+    const tag = `[Stream ${this._options.sessionId.slice(0, 8)}]`;
+    console.log(`${tag} segment #${chunkIndex} ${segment.startMs}-${segment.endMs} ms: "${segment.text.slice(0, 80)}"`);
     const task = (async () => {
       try {
         await this._options.onSegment(segment);
         this._failedSegments.delete(seq);
         this.ack(seq);
-      } catch {
+      } catch (firstErr) {
+        console.warn(`${tag} checkpoint of segment #${chunkIndex} failed, retrying in 1.5s:`, firstErr);
         // One inline retry; anything still failing is drained at stop().
         try {
           await sleep(1500);
           await this._options.onSegment(segment);
           this._failedSegments.delete(seq);
           this.ack(seq);
-        } catch {
+        } catch (secondErr) {
+          console.error(`${tag} checkpoint of segment #${chunkIndex} failed twice; will retry at stop():`, secondErr);
           this._failedSegments.set(seq, segment);
         }
       }
@@ -395,8 +425,9 @@ export class AudioStreamClient {
         await this._options.onSegment(segment);
         this._failedSegments.delete(seq);
         this.ack(seq);
-      } catch {
+      } catch (err) {
         // Left in _failedSegments; finalize still proceeds with what we have.
+        console.error(`[Stream] segment #${segment.chunkIndex} could not be saved at stop(); its text is lost server-side:`, err);
       }
     }
   }

@@ -484,6 +484,8 @@ export async function getPipelineRecord(id: string): Promise<PipelineRecord | nu
         isLiveSession: 1,
         music: 1,
         transcriptSource: 1,
+        receivedChunks: 1,
+        duration: 1,
       },
     },
   );
@@ -507,6 +509,8 @@ export async function getPipelineRecord(id: string): Promise<PipelineRecord | nu
     isLiveSession: doc.isLiveSession ?? false,
     music: (doc.music as MusicDetection | undefined) ?? undefined,
     transcriptSource: doc.transcriptSource ?? undefined,
+    receivedChunks: typeof doc.receivedChunks === 'number' ? doc.receivedChunks : undefined,
+    duration: typeof doc.duration === 'number' ? doc.duration : 0,
   };
 }
 

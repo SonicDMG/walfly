@@ -421,6 +421,10 @@ export function useRecordingUpload() {
         console.warn('[LocalBuffer] unavailable; streaming only:', err);
       }
       bufferRef.current = buffer;
+      console.log(
+        `[Record ${sessionId.slice(0, 8)}] capture started: rate=${sampleRate} Hz, ` +
+          `localBuffer=${buffer ? 'on' : 'OFF'}, api=${apiUrl('')}`,
+      );
 
       // 4. Session document.
       const sessionRes = await fetch(apiUrl('/api/recordings/session'), {
@@ -429,8 +433,11 @@ export function useRecordingUpload() {
         body: JSON.stringify({ id: sessionId, createdAt: new Date(startedAt).toISOString() }),
       });
       if (!sessionRes.ok) {
-        throw new Error(`Could not start the recording session (${sessionRes.status})`);
+        const detail = await readError(sessionRes);
+        console.error(`[Record ${sessionId.slice(0, 8)}] POST /api/recordings/session failed: ${sessionRes.status} ${detail}`);
+        throw new Error(`Could not start the recording session (${sessionRes.status}${detail ? `: ${detail}` : ''})`);
       }
+      console.log(`[Record ${sessionId.slice(0, 8)}] session document created`);
 
       // 5. Location never delays the stream: patch it in when it resolves.
       void requestAndCapture().then((snapshot) => patchLocation(sessionId, snapshot));
@@ -443,9 +450,19 @@ export function useRecordingUpload() {
       try {
         client = await openClientRef.current(sessionId, sampleRate);
       } catch (err) {
+        console.error(
+          `[Record ${sessionId.slice(0, 8)}] could not attach to the ASR sidecar — NO live transcript will be produced` +
+            (buffer ? '; recording continues into the local buffer only' : ''),
+          err,
+        );
         if (!buffer) throw err;
         streamLostRef.current = true;
-        console.warn('[Stream] sidecar unreachable; recording locally:', err);
+        if (mountedRef.current) {
+          setError(
+            `Live transcription is unavailable (${err instanceof Error ? err.message : String(err)}). ` +
+              'Audio is still being saved on this device.',
+          );
+        }
       }
       clientRef.current = client;
       if (mountedRef.current) setStreamState(client ? 'live' : 'offline');
@@ -525,6 +542,12 @@ export function useRecordingUpload() {
       }
       const durationSec = Math.max(1, Math.round((Date.now() - startedAtRef.current) / 1000));
       const hasTranscript = postedSegmentsRef.current > 0;
+      console.log(
+        `[Record ${sessionId.slice(0, 8)}] stopping: ${durationSec}s, ` +
+          `stream=${client ? client.state : 'none'}, segmentsPosted=${postedSegmentsRef.current}, ` +
+          `framesCaptured=${client?.capturedFrames ?? 'n/a'}, unacked=${client?.unackedFrames ?? 'n/a'}, ` +
+          `dropped=${client?.droppedFrames ?? 'n/a'}`,
+      );
 
       // `stop()` sends bye and waits for the sidecar's final flush; pending
       // segment checkpoints are drained inside.

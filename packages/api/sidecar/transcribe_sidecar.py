@@ -163,26 +163,44 @@ async def stream(websocket: WebSocket) -> None:
 
     # ── auth ────────────────────────────────────────────────────────────────
     origin = websocket.headers.get("origin")
+    peer = f"{websocket.client.host}:{websocket.client.port}" if websocket.client else "?"
+    log.info("ws connect from %s origin=%s subprotocols=%d", peer, origin, len(subprotocols))
     if origin and not _origin_allowed(origin):
         _counters["rejects_total"] += 1
+        log.warning("ws reject from %s: origin %r not in ALLOWED_ORIGINS=%s", peer, origin, settings.allowed_origins)
         await _close_with_error(websocket, protocol.CLOSE_AUTH, "origin not allowed")
         return
     token = validator.ticket_from_subprotocols(subprotocols)
-    ticket = validator.validate(token) if token else None
+    if not token:
+        _counters["rejects_total"] += 1
+        log.warning("ws reject from %s: no 'ticket.*' subprotocol offered (got %s)", peer, subprotocols)
+        await _close_with_error(websocket, protocol.CLOSE_AUTH, "missing ticket")
+        return
+    ticket = validator.validate(token)
     if ticket is None:
         _counters["rejects_total"] += 1
-        await _close_with_error(websocket, protocol.CLOSE_AUTH, "missing or invalid ticket")
+        # validator.validate has already logged the specific reason.
+        await _close_with_error(websocket, protocol.CLOSE_AUTH, "invalid ticket (see sidecar log for the reason)")
         return
 
     # ── hello ───────────────────────────────────────────────────────────────
     try:
         hello = await asyncio.wait_for(websocket.receive_json(), timeout=10)
-    except (asyncio.TimeoutError, ValueError):
+    except (asyncio.TimeoutError, ValueError) as exc:
+        log.warning("ws reject session %s: no valid hello within 10s (%r)", ticket.session_id, exc)
         await _close_with_error(websocket, protocol.CLOSE_IDLE, "hello timeout")
         return
     if hello.get("t") != "hello" or hello.get("sessionId") != ticket.session_id:
+        log.warning(
+            "ws reject: hello does not match ticket (t=%r hello.sessionId=%r ticket.sessionId=%r)",
+            hello.get("t"), hello.get("sessionId"), ticket.session_id,
+        )
         await _close_with_error(websocket, protocol.CLOSE_AUTH, "hello does not match ticket")
         return
+    log.info(
+        "ws hello session=%s codec=%s rate=%s channels=%s resume=%s",
+        ticket.session_id, hello.get("codec"), hello.get("sampleRate"), hello.get("channels"), hello.get("resume"),
+    )
     codec = hello.get("codec") or "pcm_s16le"
     if codec != "pcm_s16le":
         # `aac_adts` (Bee) is a planned extension; reject loudly rather than misparse.

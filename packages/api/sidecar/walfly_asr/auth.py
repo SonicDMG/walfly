@@ -52,18 +52,22 @@ class TicketValidator:
     def validate(self, token: str, *, now: float | None = None) -> Ticket | None:
         """Return the ticket payload, or None when invalid/expired/replayed."""
         if self._secret is None:
+            log.warning("Rejected WS ticket: WALFLY_WS_SECRET is not configured on the sidecar (restart it after setting the secret)")
             return None
         now = time.time() if now is None else now
         try:
             version, session_b64, exp_raw, nonce, sig = token.split(".")
         except ValueError:
+            log.warning("Rejected WS ticket: malformed (expected 5 dot-separated parts)")
             return None
         if version != "v1":
+            log.warning("Rejected WS ticket: unsupported version %r", version)
             return None
         try:
             session_id = b64url_decode(session_b64).decode("utf-8")
             expires_at = float(exp_raw)
-        except Exception:  # noqa: BLE001 - malformed token is simply invalid
+        except Exception as exc:  # noqa: BLE001 - malformed token is simply invalid
+            log.warning("Rejected WS ticket: undecodable session/expiry (%s)", exc)
             return None
 
         expected = hmac.new(
@@ -74,8 +78,14 @@ class TicketValidator:
         try:
             provided = b64url_decode(sig)
         except Exception:  # noqa: BLE001
+            log.warning("Rejected WS ticket for session %s: undecodable signature", session_id)
             return None
         if not hmac.compare_digest(expected, provided):
+            log.warning(
+                "Rejected WS ticket for session %s: signature mismatch — the API and the sidecar "
+                "have different WALFLY_WS_SECRET values (or one was not restarted after a change)",
+                session_id,
+            )
             return None
         if now > expires_at + self._ttl_slack_s:
             log.info("Rejected expired WS ticket for session %s", session_id)

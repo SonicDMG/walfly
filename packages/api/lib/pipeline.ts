@@ -102,7 +102,22 @@ export async function advanceRecording(id: string): Promise<AdvanceResult> {
       }
 
       if (!markdown || !markdown.trim()) {
-        throw new Error('No transcript available for recording');
+        // Spell out what the pipeline saw, so the cause is visible without
+        // opening Astra: a live session with 0 segments means the sidecar
+        // stream never delivered text (socket never attached, ticket failed,
+        // or the client stopped before the first segment).
+        const detail =
+          `live=${Boolean(record.isLiveSession)} source=${record.transcriptSource ?? 'none'} ` +
+          `segments=${record.receivedChunks ?? 0} duration=${record.duration ?? 0}s ` +
+          `audio=${record.audioUrl ?? 'none'}`;
+        const reason = needsAsr
+          ? 'ASR over the stored audio returned no text (silent/empty file, or the audio was never attached)'
+          : (record.receivedChunks ?? 0) === 0
+            ? 'live session finalized with 0 streamed segments: the audio WebSocket to the sidecar never delivered text, ' +
+              'and no local-buffer recovery upload was attached (check the browser console for [Stream]/[Recovery] lines ' +
+              'and the sidecar log for "ws connect")'
+            : 'segments were received but the stitched transcript is empty';
+        throw new Error(`No transcript available for recording — ${reason} [${detail}]`);
       }
 
       await storeTranscript(id, markdown);
