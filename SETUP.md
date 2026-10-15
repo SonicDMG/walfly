@@ -26,8 +26,9 @@ There is no root env file — a root `.env` is read by neither.
 | `ASTRA_DB_API_ENDPOINT` | **yes** | Astra console → your database → *Connect* → API Endpoint | Looks like `https://<db-id>-<region>.apps.astra.datastax.com`. Read by `packages/db/src/client.ts`. |
 | `ASTRA_DB_APPLICATION_TOKEN` | **yes** | Astra console → *Generate Token* (role: Database Administrator) | Starts with `AstraCS:`. |
 | `ASTRA_DB_KEYSPACE` | no | Astra console → your database → keyspaces | Omit to use the database's default keyspace. |
-| `DOCLING_SERVICE_URL` | **yes** (for transcription) | IBM Docling SaaS instance details | **Must include the instance-id path segment**, e.g. `https://api.<region>.dcls.saas.ibm.com/<instance-id>`. Trailing slashes are stripped. URLs are joined with template literals precisely so this path segment survives. |
-| `DOCLING_API_KEY` | **yes** (for transcription) | IBM Docling SaaS instance credentials | Sent as `X-Api-Key` on every call. No IAM token exchange, no Bearer. |
+| `SIDECAR_URL` | **yes** (for file transcription) | Your sidecar host, or `http://localhost:8888` locally | The sidecar runs on faster-whisper now (see `packages/api/sidecar/`). Timeout is 10 minutes. |
+| `WALFLY_WS_SECRET` | **yes** (for live recording) | Generate with `openssl rand -hex 32` | Shared secret for the short-lived WebSocket tickets. The sidecar reads it from its own environment or from this file (the config loader searches `packages/api/sidecar/.env.local`, this file, then the repo root). |
+| `SIDECAR_WS_URL` | no | e.g. `wss://walfly-asr.fly.dev/v1/stream` | Where live audio streams. Defaults to `ws://localhost:8888/v1/stream`; the ticket response carries it to the app, so the mobile app needs no extra variable. |
 | `LLM_BASE_URL` | no (but effectively yes) | Your OpenAI-compatible proxy | e.g. `https://openrouter.ai/api/v1`, a LiteLLM URL, or `http://localhost:11434/v1` for Ollama. Omit to hit api.openai.com. |
 | `LLM_API_KEY` | **yes** (for enrichment and chat) | The proxy above | Use the literal string `ollama` for a local Ollama. |
 | `LLM_MODEL` | **yes** (for enrichment and chat) | The proxy's model list | **No default by design.** A wrong default produces a 404 that reads like a network failure. |
@@ -71,22 +72,20 @@ The seeder:
 npm run seed --workspace=packages/db -- --recreate   # DROPS the collection and all documents
 ```
 
-### Verify Docling can actually transcribe
+### Verify the ASR sidecar transcribes
 
 ```bash
-npm run smoke:docling --workspace=packages/api                        # wire contract only
-npm run smoke:docling --workspace=packages/api -- ./my-voice-memo.m4a # real ASR check
+# File path (same response contract the pipeline consumes):
+curl -F "files=@./my-voice-memo.m4a" http://localhost:8888/v1/transcribe
+
+# Streaming path against a local audio file (speech recommended; a tone proves
+# nothing). Prints partials, segments and PASS/FAIL:
+uv run --project packages/api/sidecar python packages/api/sidecar/scripts/stream_smoke.py \
+    ./my-voice-memo.m4a --secret "$WALFLY_WS_SECRET"
 ```
 
-Exit codes: `0` pass · `1` fail · `2` inconclusive.
-
-The default payload is a synthesised 1-second tone. A working ASR deployment transcribes a
-tone to **nothing**, so an empty transcript with the default payload proves the submit /
-poll / result contract works and proves **nothing about ASR**; the script says so and exits
-`2`. **Pass a few seconds of real speech** (`.wav .mp3 .m4a .mp4 .aac .ogg .opus .flac`) to get
-a real answer. If the script prints a 415, or a result mentioning FFmpeg/Whisper, this
-Docling deployment cannot do ASR at all — no payload tuning fixes that, and the follow-up is
-a dedicated STT provider behind the same three functions in `packages/api/lib/transcribe.ts`.
+The first run downloads the Whisper model (`ASR_MODEL`, default `small.en`;
+`tiny.en` is a fast local choice) into the Hugging Face cache.
 
 ### Check everything at once
 
@@ -163,12 +162,20 @@ bites on the first release build. iOS permits it via Expo's default `NSAllowsArb
 
 ## 4. How a recording flows
 
-1. Client records **32 kbps mono 22.05 kHz AAC** (M4A on native and on Safari/Chrome web; Ogg/Opus on Firefox), capped at 15 minutes and 4 MB.
-2. `POST /api/recordings/upload` (multipart) sniffs the **magic bytes** — the client's filename and declared MIME are diagnostics only — rewrites an MPEG-4 `ftyp` major brand to `M4A ` so Docling classifies it as audio, stores the bytes, inserts the document with `status: "uploaded"`, and returns. **It starts no work.**
-3. The client POSTs `/api/recordings/{id}/process` repeatedly. Each tick advances the job by **exactly one step** — submit → poll → fetch result → enrich — under an expiring lease held in Astra, so nothing ever outlives a serverless function's budget and a mid-step crash is recoverable.
-4. Statuses are exactly `uploaded → transcribing → enriching → ready`, or `failed`.
-5. A transient error (network blip, Blob 500, Docling 5xx) frees the lease, bumps an attempt counter and leaves the status alone so the next tick retries. Only a non-retryable error, or the 5th consecutive transient one, writes `failed`.
-6. If the app is backgrounded mid-job, the **Recordings tab** keeps ticking non-terminal rows on a timer while it is focused, honouring the server's own `retryAfterMs`.
+**Live (the record button) — streaming:**
+
+1. Client opens a session (`POST /api/recordings/session`) and streams **16 kHz mono PCM** over one WebSocket to the ASR sidecar in 100 ms binary frames. The sidecar owns VAD, segmentation and transcription; partial transcripts stream back for live captions.
+2. Every finalized segment is checkpointed with `POST /api/recordings/{id}/segments` and only then ACKed to the sidecar. Acked means durable in Astra. A dropped socket reconnects with a fresh ticket and re-sends everything un-acked; nothing the client captured is lost.
+3. Independently, **every frame is also written to a crash-safe local file** (`walfly-recordings/<id>.wav`; OPFS on web). If the sidecar or the API is unreachable — or the app dies — the recording is delivered and transcribed from that file on a later launch (`streaming-plan.md` §11). Only server-confirmed deliveries delete it.
+4. On stop the client waits for the sidecar's final flush, delivers the local buffer, and the recording moves `uploaded → enriching → ready` through the same `/process` ticks below. The server keeps the streamed transcript when it is complete (small gaps, ≥95% coverage) and re-transcribes the file otherwise. Live sessions never re-run ASR unless the recovered file demands it.
+
+**File upload (secondary path):**
+
+5. `POST /api/recordings/upload` (multipart) sniffs the **magic bytes** — the client's filename and declared MIME are diagnostics only — stores the bytes, inserts the document with `status: "uploaded"`, and returns. **It starts no work.**
+6. The client POSTs `/api/recordings/{id}/process` repeatedly. Each tick advances the job by **exactly one step** — transcribe → enrich — under an expiring lease held in Astra, so nothing ever outlives a serverless function's budget and a mid-step crash is recoverable.
+7. Statuses are `uploaded → transcribing → enriching → ready` (file) or `uploaded → enriching → ready` (live), or `failed`.
+8. A transient error (network blip, Blob 500, ASR 5xx, LLM connection error) frees the lease, bumps an attempt counter and leaves the status alone so the next tick retries. Only a non-retryable error, or the 5th consecutive transient one, writes `failed`.
+9. If the app is backgrounded mid-job, the **Recordings tab** keeps ticking non-terminal rows on a timer while it is focused, honouring the server's own `retryAfterMs`.
 
 ---
 

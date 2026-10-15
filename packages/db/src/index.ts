@@ -24,5 +24,6 @@ export type {
   RecordingPatch, PipelineRecord, PipelineStage,
   RecordingChunk, ChunkStatus,
   MusicMatch, MusicDetection,
+  TranscriptSource, RecordingRecovery,
 } from './types';
 export { NON_TERMINAL_STATUSES } from './types';

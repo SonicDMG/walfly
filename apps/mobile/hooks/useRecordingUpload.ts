@@ -1,60 +1,63 @@
 /**
  * useRecordingUpload.ts
  *
- * The full record → upload → drive-the-pipeline lifecycle on web and native.
+ * The full record → stream → finalize → drive-the-pipeline lifecycle.
  *
  * Contract this file enforces, and why each part exists:
- *   - Microphone permission is requested on every platform before recording;
- *     the iOS module rejects prepareToRecordAsync without it.
- *   - The iOS audio session is switched into record mode before recording and
- *     back out afterwards, so later playback is not routed to the earpiece.
- *   - Audio is captured at 32 kbps mono 22.05 kHz. Whisper resamples to 16 kHz
- *     mono anyway, and this keeps a 15-minute walk small enough for the 4 MB
- *     request-body cap Vercel enforces at the routing layer.
- *   - The container is negotiated to one Docling's ASR pipeline accepts. Where
- *     the browser can only produce WebM — which Docling classifies as VIDEO —
- *     the recording is decoded and re-encoded as WAV before upload, because
- *     relabelling a Blob's MIME type transcodes nothing and the server
- *     re-sniffs the bytes anyway.
- *   - The file is uploaded with its TRUE type. On native the file URI is handed
- *     to FormData directly, because React Native's Blob cannot be built from a
- *     Uint8Array and its FormData only serialises { uri, name, type } parts.
- *   - On web, recording bypasses expo-av's Audio.Recording and drives
- *     MediaRecorder directly (see lib/webRecorder.ts), because expo-av only
- *     captures audio in a single blob assembled at stop() time — if the
- *     browser halts the recorder first (backgrounded tab, locked screen),
- *     that blob is never produced and the whole recording is lost silently.
- *     Chunked capture means whatever was recorded before an interruption
- *     still uploads.
- *   - Nothing runs in the background on the server: this hook polls
- *     POST /api/recordings/{id}/process, and each tick advances the job one step.
- *   - Every timer, recorder and in-flight request is torn down on unmount, and
- *     no state is set afterwards.
+ *   - Audio streams continuously from the microphone to the ASR sidecar over
+ *     one WebSocket; the sidecar owns VAD, chunking and transcription (see
+ *     streaming-plan.md at the repo root). Nothing is encoded, chunked or
+ *     silence-gated on the client.
+ *   - Web capture is an AudioWorklet Float32 tap (lib/webMic.ts); native
+ *     capture is expo-audio's AudioStream (int16 PCM). Both feed the same
+ *     100 ms frame batcher (lib/pcm.ts) and the same client (lib/streamClient.ts).
+ *   - The session document is created before the socket opens; finalized
+ *     segments are checkpointed through POST /api/recordings/{id}/segments and
+ *     acked to the sidecar only after that write succeeds — acked means
+ *     durable in Astra.
+ *   - Microphone permission is requested on every platform before recording,
+ *     and the iOS audio session is switched into record mode and back out, so
+ *     later playback is not routed to the earpiece.
+ *   - Location never delays recording: capture starts immediately and the
+ *     resolved place is patched onto the session when it arrives.
+ *   - Nothing runs in the background on the server: this hook drives
+ *     POST /api/recordings/{id}/process until the recording is ready.
+ *   - Every timer, capture handle and in-flight request is torn down on
+ *     unmount, and no state is set afterwards.
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Platform } from 'react-native';
 import {
-  AudioModule,
   requestRecordingPermissionsAsync,
   setAudioModeAsync,
-  AudioQuality,
-  IOSOutputFormat,
-  type RecordingOptions,
+  useAudioStream,
+  type AudioStreamBuffer,
 } from 'expo-audio';
 import {
   apiUrl,
   describeRequestError,
+  fetchWsTicket,
+  postSegment,
   type ProcessResponse,
   type RecordingStatus,
-  type UploadResponse,
 } from '../lib/api';
 import { useLocationPermission, type LocationSnapshot } from './useLocationPermission';
-// Web-only in practice; every Web Audio reference inside is guarded at call time.
-import { transcodeToWav } from '../lib/audio-wav';
+import { createFrameBatcher, type FrameBatcher } from '../lib/pcm';
 // Web-only in practice; every browser API reference inside is guarded at call time.
-import { startWebRecording, type WebRecordingHandle } from '../lib/webRecorder';
-import { chunkUploadQueue } from '../lib/chunkQueue';
+import { startWebMic, type WebMicHandle } from '../lib/webMic';
+import {
+  AudioStreamClient,
+  type StreamConnectionState,
+  type StreamSegment,
+} from '../lib/streamClient';
+import {
+  createLocalBuffer,
+  listPendingBuffers,
+  openExistingBuffer,
+  type LocalBuffer,
+} from '../lib/localBuffer';
+import { deliverLocalBuffer } from '../lib/recoverClient';
 
 const ACTIVE_SESSION_STORAGE_KEY = 'walfly_active_recording_session';
 
@@ -71,32 +74,17 @@ export interface UploadResult {
   id: string;
 }
 
-/**
- * dBFS threshold below which a chunk is treated as silence and skipped.
- * Speech peaks typically sit at -25 dBFS to -10 dBFS, while mobile ambient noise
- * (mic gain, room acoustics, AC/fans) frequently sits between -38 dBFS and -32 dBFS.
- * Setting this to -32 dBFS ensures quiet/silent chunks are cleanly gated on mobile devices.
- */
-const SILENCE_DB_THRESHOLD = -32;
-/** How often (ms) to sample metering from the active recorder within a chunk window. */
-const METERING_POLL_MS = 250;
-
-/** Android's MediaRecorder rejects with E_AUDIO_NODATA if stopped before any frames land. */
-const MIN_RECORDING_MS = 700;
-/** Hard stop, so a forgotten recorder cannot grow an unbounded upload. */
+/** Below this, no usable audio has been captured; Android can also drop the first frames. */
+const MIN_RECORDING_MS = 1200;
+/** Hard stop, so a forgotten recorder cannot run forever. */
 const MAX_RECORDING_MS = 15 * 60 * 1000;
-/**
- * Conservative default, used only until the server reports its real ceiling via
- * GET /api/recordings/upload. Vercel returns 413 FUNCTION_PAYLOAD_TOO_LARGE
- * above 4.5 MB before the handler runs; a local server has far more headroom,
- * which matters because a WebM-only browser uploads uncompressed WAV.
- */
-const FALLBACK_MAX_UPLOAD_BYTES = 4_000_000;
-/** Location is optional metadata and must never delay the upload. */
-const LOCATION_WAIT_MS = 4000;
 /** Give up on the server-side pipeline after this long. */
 const PROCESSING_DEADLINE_MS = 20 * 60 * 1000;
 const AUTO_RESET_MS = 2000;
+/** How much live text the UI keeps for display. */
+const LIVE_TRANSCRIPT_MAX_CHARS = 1200;
+/** Frames captured before the socket is ready (worst case ~2 s). */
+const PREROLL_MAX_FRAMES = 20;
 
 const PROGRESS_BY_STATUS: Record<RecordingStatus, number> = {
   recording: 0.2,
@@ -107,71 +95,45 @@ const PROGRESS_BY_STATUS: Record<RecordingStatus, number> = {
   failed: 1,
 };
 
-/**
- * MediaRecorder containers, best first. Docling's ASR pipeline accepts
- * wav/mp3/m4a/aac/ogg/flac, so a browser that can produce one of those (Safari
- * → audio/mp4, Firefox → audio/ogg) uploads its recording untouched and keeps
- * Opus/AAC compression.
- *
- * The codec-qualified `audio/mp4;codecs=mp4a.40.2` is deliberately absent:
- * Chrome reports it as supported via isTypeSupported, but its AAC encoder
- * throws EncodingError as soon as an explicit low bitrate (our 32 kbps) is
- * requested against that exact codec string, so `dataavailable` never
- * carries any data. Bare `audio/mp4` produces the same AAC-in-MP4 output and
- * respects the bitrate correctly.
- *
- * WebM is last, not absent: Chrome can encode nothing else, and refusing to
- * record at all is a worse outcome than recording and converting afterwards.
- * A WebM recording is decoded and re-encoded as WAV before upload — see
- * transcodeToWav — because Docling treats webm as a VIDEO container.
- */
-const WEB_MIME_PREFERENCE = [
-  'audio/mp4',
-  'audio/ogg;codecs=opus',
-  'audio/ogg',
-  'audio/webm;codecs=opus',
-  'audio/webm',
-] as const;
-
-/** The exact filename + declared MIME the server is told about, keyed by the real blob type. */
-const UPLOAD_SHAPE_BY_MIME: Record<string, { ext: string; mime: string }> = {
-  'audio/mp4': { ext: 'm4a', mime: 'audio/mp4' },
-  'audio/m4a': { ext: 'm4a', mime: 'audio/mp4' },
-  'audio/x-m4a': { ext: 'm4a', mime: 'audio/mp4' },
-  'audio/aac': { ext: 'aac', mime: 'audio/aac' },
-  'audio/ogg': { ext: 'ogg', mime: 'audio/ogg' },
-  'audio/opus': { ext: 'ogg', mime: 'audio/ogg' },
-  'audio/wav': { ext: 'wav', mime: 'audio/wav' },
-  'audio/wave': { ext: 'wav', mime: 'audio/wav' },
-  'audio/x-wav': { ext: 'wav', mime: 'audio/wav' },
-  'audio/mpeg': { ext: 'mp3', mime: 'audio/mpeg' },
-  'audio/mp3': { ext: 'mp3', mime: 'audio/mpeg' },
-};
-
 export function useRecordingUpload() {
   const [state, setState] = useState<RecordState>('idle');
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<UploadResult | null>(null);
   const [progress, setProgress] = useState(0);
+  /** Growing live text: finalized segments plus the current partial. */
+  const [liveTranscript, setLiveTranscript] = useState('');
+  const [streamState, setStreamState] = useState<StreamConnectionState | 'idle' | 'offline'>('idle');
 
   const mountedRef = useRef(true);
-  const recordingRef = useRef<InstanceType<typeof AudioModule.AudioRecorder> | null>(null);
-  const webRecordingRef = useRef<WebRecordingHandle | null>(null);
+  const sessionIdRef = useRef<string | null>(null);
+  const clientRef = useRef<AudioStreamClient | null>(null);
+  const batcherRef = useRef<FrameBatcher | null>(null);
+  const webMicRef = useRef<WebMicHandle | null>(null);
   const startedAtRef = useRef(0);
-  const chunkStartTimeRef = useRef(0);
-  const nativeChunkTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const isRotatingRef = useRef(false);
-  const nativeChunkStoppedRef = useRef(false);
-  const windowPeakDbRef = useRef<number>(-Infinity);
-  const meteringPollTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const startTimestampRef = useRef('');
-  const locationPromiseRef = useRef<Promise<LocationSnapshot | null> | null>(null);
   const autoResetTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const maxDurationTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const activeSessionIdRef = useRef<string | null>(null);
-  const chunkIndexCounterRef = useRef<number>(0);
   const abortRef = useRef<AbortController | null>(null);
   const stopRef = useRef<() => void>(() => undefined);
+
+  // Live text assembly (refs so the stream callbacks never close over stale state).
+  const finalizedTextRef = useRef('');
+  const partialTextRef = useRef('');
+  const postedSegmentsRef = useRef(0);
+  // Frames captured before the stream client is ready are held briefly, then flushed.
+  const prerollRef = useRef<Int16Array[] | null>(null);
+  // Native capture flag: buffers arriving outside a recording are ignored.
+  const nativeActiveRef = useRef(false);
+  // True from the moment capture+stream are live until a stop is claimed;
+  // drives the "sidecar ended the session" path.
+  const recordingActiveRef = useRef(false);
+  // The crash-safe local copy of every frame (null when the platform cannot
+  // buffer; behaviour then falls back to the streaming-only path).
+  const bufferRef = useRef<LocalBuffer | null>(null);
+  // True while the live stream is detached (sidecar unreachable, or the server
+  // ended the session): capture continues and the buffer is the safety net.
+  const streamLostRef = useRef(false);
+  // Guards stopAndUpload against re-entry without losing the tail flush.
+  const stoppingRef = useRef(false);
 
   const { requestAndCapture } = useLocationPermission();
 
@@ -183,6 +145,122 @@ export function useRecordingUpload() {
     if (mountedRef.current) setProgress(next);
   }, []);
 
+  const publishLiveText = useCallback(() => {
+    if (!mountedRef.current) return;
+    const text = `${finalizedTextRef.current} ${partialTextRef.current}`.trim();
+    setLiveTranscript(text.length > LIVE_TRANSCRIPT_MAX_CHARS ? text.slice(-LIVE_TRANSCRIPT_MAX_CHARS) : text);
+  }, []);
+
+  /**
+   * Opens one audio socket. Extracted so both the initial start and the
+   * server-ended path ("open a fresh server session and keep going") share it.
+   * Assigned every render to capture fresh closures.
+   */
+  const openClientRef = useRef<(sessionId: string, sampleRate: number) => Promise<AudioStreamClient>>(
+    async () => {
+      throw new Error('client factory not ready');
+    },
+  );
+  openClientRef.current = (sessionId: string, sampleRate: number) =>
+    AudioStreamClient.open({
+      sessionId,
+      sampleRate,
+      getTicket: () => fetchWsTicket(sessionId),
+      onPartial: (partial) => {
+        partialTextRef.current = partial.text;
+        publishLiveText();
+      },
+      onSegment: async (segment: StreamSegment) => {
+        await postSegment(sessionId, {
+          chunkIndex: segment.chunkIndex,
+          startMs: segment.startMs,
+          endMs: segment.endMs,
+          text: segment.text,
+        });
+        postedSegmentsRef.current += 1;
+        finalizedTextRef.current = `${finalizedTextRef.current} ${segment.text}`.trim();
+        partialTextRef.current = '';
+        publishLiveText();
+      },
+      onState: (next, detail) => {
+        if (next === 'live') streamLostRef.current = false;
+        if (mountedRef.current) setStreamState(next);
+        if (next === 'failed' && detail) {
+          console.warn(`[Stream] degraded: ${detail}`);
+        }
+      },
+      onGap: (fromMs, toMs) => {
+        console.warn(`[Stream] audio gap ${fromMs}–${toMs} ms`);
+      },
+      onEnded: () => {
+        // The sidecar ended the session by itself (idle timeout, capacity,
+        // max duration, deploy). Keep recording: the local buffer already
+        // holds the audio, and we try once to open a fresh server session so
+        // live transcription resumes. Everything already checkpointed is
+        // durable; nothing here may throw into the capture path.
+        console.warn('[Stream] the sidecar ended the session; continuing locally');
+        streamLostRef.current = true;
+        if (mountedRef.current) setStreamState('offline');
+        const previous = clientRef.current;
+        void (async () => {
+          try {
+            const replacement = await openClientRef.current(sessionId, sampleRate);
+            if (recordingActiveRef.current && clientRef.current === previous) {
+              clientRef.current = replacement;
+              streamLostRef.current = false;
+              if (mountedRef.current) setStreamState('live');
+            } else {
+              replacement.close();
+            }
+          } catch (err) {
+            console.warn('[Stream] could not re-attach; staying local:', err);
+          }
+        })();
+      },
+    });
+
+  /** Single entry point for every captured frame, from either platform. */
+  const handleFrameRef = useRef<(frame: Int16Array) => void>(() => undefined);
+  handleFrameRef.current = (frame: Int16Array) => {
+    const client = clientRef.current;
+    if (client) {
+      client.push(frame);
+    } else {
+      const preroll = prerollRef.current;
+      if (preroll && preroll.length < PREROLL_MAX_FRAMES) preroll.push(frame);
+    }
+    // Tee into the crash-safe local copy. Both consumers copy the frame before
+    // it can be reused, so the order here is not load-bearing; the cost is
+    // ~3.2 KB at 10 Hz and the call can never throw.
+    bufferRef.current?.append(frame);
+  };
+
+  const pushSamples = useCallback((push: (batcher: FrameBatcher) => void, sampleRate: number) => {
+    let batcher = batcherRef.current;
+    if (!batcher || batcher.sampleRate !== sampleRate) {
+      batcher = createFrameBatcher({
+        sampleRate,
+        onFrame: (frame) => handleFrameRef.current(frame),
+      });
+      batcherRef.current = batcher;
+    }
+    push(batcher);
+  }, []);
+
+  // Native capture uses expo-audio's AudioStream (web returns null; the web
+  // path captures through lib/webMic.ts instead). The hook is called
+  // unconditionally to obey the rules of hooks.
+  const nativeStream = useAudioStream({
+    sampleRate: 16000,
+    channels: 1,
+    encoding: 'int16',
+    onBuffer: (buffer: AudioStreamBuffer) => {
+      if (!nativeActiveRef.current) return;
+      const rate = buffer.sampleRate || 16000;
+      pushSamples((batcher) => batcher.pushInt16(new Int16Array(buffer.data)), rate);
+    },
+  });
+
   const clearTimers = useCallback(() => {
     if (autoResetTimerRef.current) {
       clearTimeout(autoResetTimerRef.current);
@@ -192,64 +270,91 @@ export function useRecordingUpload() {
       clearTimeout(maxDurationTimerRef.current);
       maxDurationTimerRef.current = null;
     }
-    if (nativeChunkTimerRef.current) {
-      clearInterval(nativeChunkTimerRef.current);
-      nativeChunkTimerRef.current = null;
-    }
-    if (meteringPollTimerRef.current) {
-      clearInterval(meteringPollTimerRef.current);
-      meteringPollTimerRef.current = null;
-    }
   }, []);
 
-  /** Stops and removes any live recorder. Never throws: teardown must always complete. */
-  const teardownRecorder = useCallback(async () => {
-    if (Platform.OS === 'web') {
-      const handle = webRecordingRef.current;
-      webRecordingRef.current = null;
-      handle?.cancel();
-      return;
+  /** Stops and removes any live capture and stream client. Never throws. */
+  const teardownCapture = useCallback(async () => {
+    const webMic = webMicRef.current;
+    webMicRef.current = null;
+    if (webMic) {
+      try {
+        batcherRef.current?.flushPartial();
+      } catch {}
+      webMic.stop();
     }
-    const recording = recordingRef.current;
-    recordingRef.current = null;
-    if (!recording) return;
-    try {
-      await recording.stop();
-    } catch {
-      // The recorder may already be stopped.
+    if (nativeActiveRef.current) {
+      nativeActiveRef.current = false;
+      try {
+        nativeStream.stream.stop();
+      } catch {
+        // Already stopped.
+      }
     }
-  }, []);
+    const client = clientRef.current;
+    clientRef.current = null;
+    if (client) {
+      try {
+        client.close();
+      } catch {}
+    }
+    batcherRef.current = null;
+    prerollRef.current = null;
+    // The buffer is deliberately NOT discarded here: an unmount keeps the
+    // recording, and the launch sweep delivers it. Finalizing patches the WAV
+    // header and releases the exclusive file lock so a later sweep can open it.
+    const buffer = bufferRef.current;
+    bufferRef.current = null;
+    if (buffer) {
+      void buffer.finalize().catch(() => {});
+    }
+  }, [nativeStream]);
+
+  // ── crash recovery + teardown ─────────────────────────────────────────────
 
   useEffect(() => {
     mountedRef.current = true;
 
-    // Check for orphaned/interrupted sessions from previous runs
-    if (typeof window !== 'undefined' && window.localStorage) {
+    // Crash recovery: deliver what the local buffers hold, then heal the legacy
+    // orphan marker. A buffer that cannot be delivered yet stays on disk and is
+    // retried on the next launch and on the next recorder reset.
+    void (async () => {
+      let pendingIds: string[] = [];
       try {
-        const orphanSessionId = window.localStorage.getItem(ACTIVE_SESSION_STORAGE_KEY);
-        if (orphanSessionId) {
-          console.log(`[Crash Recovery] Found orphaned session: ${orphanSessionId}. Finalizing...`);
-          void fetch(apiUrl(`/api/recordings/${encodeURIComponent(orphanSessionId)}/finalize`), {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({}),
-          }).finally(() => {
-            try {
-              window.localStorage.removeItem(ACTIVE_SESSION_STORAGE_KEY);
-            } catch {}
-          });
-        }
+        pendingIds = await listPendingBuffers();
       } catch {}
-    }
+      const delivered = new Set<string>();
+      for (const id of pendingIds) {
+        if (await deliverOneBuffer(id)) delivered.add(id);
+      }
+
+      if (typeof window !== 'undefined' && window.localStorage) {
+        try {
+          const orphanSessionId = window.localStorage.getItem(ACTIVE_SESSION_STORAGE_KEY);
+          const stillPending =
+            orphanSessionId !== null && pendingIds.includes(orphanSessionId) && !delivered.has(orphanSessionId);
+          if (orphanSessionId && !stillPending) {
+            console.log(`[Crash Recovery] Finalizing orphaned session ${orphanSessionId}`);
+            await fetch(apiUrl(`/api/recordings/${encodeURIComponent(orphanSessionId)}/finalize`), {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({}),
+            }).catch(() => {});
+            window.localStorage.removeItem(ACTIVE_SESSION_STORAGE_KEY);
+          }
+        } catch {}
+      }
+    })();
 
     return () => {
       mountedRef.current = false;
       clearTimers();
       abortRef.current?.abort();
       abortRef.current = null;
-      void teardownRecorder().then(releaseIosRecordSession);
+      void teardownCapture().then(releaseIosRecordSession);
     };
-  }, [clearTimers, teardownRecorder]);
+  }, [clearTimers, teardownCapture]);
+
+  // ── start ─────────────────────────────────────────────────────────────────
 
   const startRecording = useCallback(async () => {
     clearTimers();
@@ -259,12 +364,13 @@ export function useRecordingUpload() {
     try {
       setError(null);
       setResult(null);
+      finalizedTextRef.current = '';
+      partialTextRef.current = '';
+      postedSegmentsRef.current = 0;
       safeSetProgress(0);
       safeSetState('requesting');
 
-      // A recorder left over from a failed run keeps expo-av's module-level
-      // singleton claimed, which makes every later createAsync throw.
-      await teardownRecorder();
+      await teardownCapture();
 
       const mic = await requestRecordingPermissionsAsync();
       if (!mic.granted) {
@@ -273,160 +379,84 @@ export function useRecordingUpload() {
         );
       }
 
-      // Fired, never awaited: losing the opening seconds of speech to a
-      // geocoder is not an acceptable trade for a place name.
-      locationPromiseRef.current = requestAndCapture();
-
-      startTimestampRef.current = new Date().toISOString();
       const startedAt = Date.now();
       startedAtRef.current = startedAt;
-      chunkStartTimeRef.current = startedAt;
-      chunkIndexCounterRef.current = 0;
+      stoppingRef.current = false;
+      streamLostRef.current = false;
+      prerollRef.current = [];
 
-      // Initialize live session on server
-      const sessionId = (globalThis.crypto?.randomUUID ? globalThis.crypto.randomUUID() : `rec-${Date.now()}`);
-      activeSessionIdRef.current = sessionId;
+      // 1. The session id first: the server document and the local buffer share
+      //    it, which is what lets a later sweep join a crash's audio to its doc.
+      const sessionId = globalThis.crypto?.randomUUID
+        ? globalThis.crypto.randomUUID()
+        : `rec-${Date.now()}`;
+      sessionIdRef.current = sessionId;
       if (typeof window !== 'undefined' && window.localStorage) {
         try {
           window.localStorage.setItem(ACTIVE_SESSION_STORAGE_KEY, sessionId);
         } catch {}
       }
 
-      void fetch(apiUrl('/api/recordings/session'), {
+      // 2. Capture first so the real sample rate is known before hello.
+      let sampleRate = 16000;
+      if (Platform.OS === 'web') {
+        webMicRef.current = await startWebMic({
+          onSamples: (samples, rate) => pushSamples((batcher) => batcher.pushFloat32(samples), rate),
+        });
+        sampleRate = webMicRef.current.sampleRate;
+      } else {
+        await setAudioModeAsync(RECORD_AUDIO_MODE);
+        nativeActiveRef.current = true;
+        await nativeStream.stream.start();
+        sampleRate = nativeStream.stream.sampleRate || 16000;
+      }
+
+      // 3. Crash-safe local buffer, created before anything else can fail: from
+      //    here on every frame lands on disk even if the sidecar or the API is
+      //    gone. If the platform cannot buffer, streaming alone still works.
+      let buffer: LocalBuffer | null = null;
+      try {
+        buffer = await createLocalBuffer(sessionId);
+      } catch (err) {
+        console.warn('[LocalBuffer] unavailable; streaming only:', err);
+      }
+      bufferRef.current = buffer;
+
+      // 4. Session document.
+      const sessionRes = await fetch(apiUrl('/api/recordings/session'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          id: sessionId,
-          createdAt: startTimestampRef.current,
-        }),
-      }).catch((e) => console.warn('[Live Session] Error initializing session:', e));
-
-      await setAudioModeAsync(RECORD_AUDIO_MODE);
-
-      if (Platform.OS === 'web') {
-        webRecordingRef.current = await startWebRecording({
-          mimeTypes: WEB_MIME_PREFERENCE,
-          audioBitsPerSecond: 32000,
-          chunkIntervalMs: 15000,
-          onChunk: (chunkBlob, durationMillis) => {
-            if (!activeSessionIdRef.current) return;
-            const currentIdx = chunkIndexCounterRef.current++;
-            const offsetMs = Math.max(0, Date.now() - startedAtRef.current - durationMillis);
-
-            chunkUploadQueue.enqueue({
-              recordingId: activeSessionIdRef.current,
-              chunkIndex: currentIdx,
-              offsetMs,
-              duration: durationMillis / 1000,
-              blob: chunkBlob,
-              attempts: 0,
-            });
-          },
-          onSilentChunk: (durationMillis) => {
-            if (!activeSessionIdRef.current) return;
-            const currentIdx = chunkIndexCounterRef.current++;
-            const offsetMs = Math.max(0, Date.now() - startedAtRef.current - durationMillis);
-            chunkUploadQueue.enqueue({
-              recordingId: activeSessionIdRef.current,
-              chunkIndex: currentIdx,
-              offsetMs,
-              duration: durationMillis / 1000,
-              silent: true,
-              attempts: 0,
-            });
-          },
-        });
-      } else {
-        const opts = recordingOptions();
-        const initialRecorder = new AudioModule.AudioRecorder(opts);
-        await initialRecorder.prepareToRecordAsync(opts);
-        initialRecorder.record();
-        recordingRef.current = initialRecorder;
-
-        // Reset peak tracker for the first window.
-        windowPeakDbRef.current = -Infinity;
-
-        // Poll metering at a fine interval to track peak dBFS across the current chunk window.
-        meteringPollTimerRef.current = setInterval(() => {
-          const rec = recordingRef.current;
-          if (!rec) return;
-          try {
-            const status = rec.getStatus();
-            const metering = status.metering;
-            if (typeof metering === 'number' && !Number.isNaN(metering)) {
-              if (metering > windowPeakDbRef.current) {
-                windowPeakDbRef.current = metering;
-              }
-            }
-          } catch (err) {
-            console.warn('[Native Metering] Poll error:', err);
-          }
-        }, METERING_POLL_MS);
-
-        // Rolling segment rotation on native: emit a chunk every 15 seconds.
-        nativeChunkStoppedRef.current = false;
-        nativeChunkTimerRef.current = setInterval(async () => {
-          if (nativeChunkStoppedRef.current) return;
-          if (!activeSessionIdRef.current || !recordingRef.current) return;
-          if (isRotatingRef.current) return; // skip if previous rotation still in progress
-
-          isRotatingRef.current = true;
-          const oldRec = recordingRef.current;
-          const currentIdx = chunkIndexCounterRef.current++;
-          const now = Date.now();
-          const chunkDurationMs = now - chunkStartTimeRef.current;
-          const offsetMs = Math.max(0, chunkStartTimeRef.current - startedAtRef.current);
-          chunkStartTimeRef.current = now;
-
-          // Snapshot and reset the peak for the next window before any async work.
-          const peakDb = windowPeakDbRef.current;
-          windowPeakDbRef.current = -Infinity;
-
-          // Prepare next recorder segment before stopping old
-          try {
-            const nextOpts = recordingOptions();
-            const nextRec = new AudioModule.AudioRecorder(nextOpts);
-            await nextRec.prepareToRecordAsync(nextOpts);
-            nextRec.record();
-            recordingRef.current = nextRec;
-
-            await oldRec.stop();
-
-            if (!activeSessionIdRef.current) return;
-
-            const isSilent = peakDb === -Infinity || peakDb < SILENCE_DB_THRESHOLD;
-            console.log(`[Native Chunking] Chunk ${currentIdx}: peakDb=${peakDb.toFixed(1)} dBFS, silent=${isSilent}`);
-
-            if (isSilent) {
-              // Chunk is silent — enqueue a silent marker; skip the audio file.
-              chunkUploadQueue.enqueue({
-                recordingId: activeSessionIdRef.current,
-                chunkIndex: currentIdx,
-                offsetMs,
-                duration: chunkDurationMs / 1000,
-                silent: true,
-                attempts: 0,
-              });
-            } else {
-              const uri = oldRec.uri;
-              if (uri) {
-                chunkUploadQueue.enqueue({
-                  recordingId: activeSessionIdRef.current,
-                  chunkIndex: currentIdx,
-                  offsetMs,
-                  duration: chunkDurationMs / 1000,
-                  uri,
-                  attempts: 0,
-                });
-              }
-            }
-          } catch (cycleErr) {
-            console.warn('[Native Chunking] Error rotating chunk segment:', cycleErr);
-          } finally {
-            isRotatingRef.current = false;
-          }
-        }, 15000);
+        body: JSON.stringify({ id: sessionId, createdAt: new Date(startedAt).toISOString() }),
+      });
+      if (!sessionRes.ok) {
+        throw new Error(`Could not start the recording session (${sessionRes.status})`);
       }
+
+      // 5. Location never delays the stream: patch it in when it resolves.
+      void requestAndCapture().then((snapshot) => patchLocation(sessionId, snapshot));
+
+      // 6. Audio socket. Frames captured up to this point are flushed from the
+      //    pre-roll buffer once the handshake completes. When the sidecar is
+      //    unreachable and a local buffer exists, recording simply continues
+      //    locally and the buffer is delivered later.
+      let client: AudioStreamClient | null = null;
+      try {
+        client = await openClientRef.current(sessionId, sampleRate);
+      } catch (err) {
+        if (!buffer) throw err;
+        streamLostRef.current = true;
+        console.warn('[Stream] sidecar unreachable; recording locally:', err);
+      }
+      clientRef.current = client;
+      if (mountedRef.current) setStreamState(client ? 'live' : 'offline');
+
+      const preroll = prerollRef.current;
+      prerollRef.current = null;
+      if (preroll && client) {
+        for (const frame of preroll) client.push(frame);
+      }
+
+      recordingActiveRef.current = true;
       safeSetState('recording');
 
       maxDurationTimerRef.current = setTimeout(() => {
@@ -434,41 +464,35 @@ export function useRecordingUpload() {
         stopRef.current();
       }, MAX_RECORDING_MS);
     } catch (err) {
-      await teardownRecorder();
+      recordingActiveRef.current = false;
+      await teardownCapture();
       await releaseIosRecordSession();
       if (mountedRef.current) {
         setError(err instanceof Error ? err.message : 'Failed to start recording');
         setState('error');
       }
     }
-  }, [clearTimers, requestAndCapture, safeSetProgress, safeSetState, teardownRecorder]);
+  }, [clearTimers, nativeStream, publishLiveText, pushSamples, requestAndCapture, safeSetProgress, safeSetState, teardownCapture]);
+
+  // ── stop ──────────────────────────────────────────────────────────────────
 
   const stopAndUpload = useCallback(async () => {
-    // Claimed synchronously. The MAX_RECORDING_MS timer and a double tap inside
-    // the MIN_RECORDING_MS floor can both land before React commits the
-    // 'uploading' state, and two calls sharing one recorder means one of them
-    // fails with "already unloaded"/"already stopped" while the other uploads
-    // successfully.
-    const isWeb = Platform.OS === 'web';
-    const recording = isWeb ? null : recordingRef.current;
-    const webHandle = isWeb ? webRecordingRef.current : null;
-    if (!recording && !webHandle) return;
-    recordingRef.current = null;
-    webRecordingRef.current = null;
+    // Claimed synchronously: a double tap or the MAX_RECORDING_MS timer can
+    // both land before React commits the 'uploading' state.
+    if (stoppingRef.current) return;
+    stoppingRef.current = true;
+    recordingActiveRef.current = false;
 
-    if (maxDurationTimerRef.current) {
-      clearTimeout(maxDurationTimerRef.current);
-      maxDurationTimerRef.current = null;
+    const client = clientRef.current;
+    const webMic = webMicRef.current;
+    const wasNative = nativeActiveRef.current;
+    const buffer = bufferRef.current;
+    if (!client && !webMic && !wasNative) {
+      stoppingRef.current = false;
+      return;
     }
-    if (nativeChunkTimerRef.current) {
-      nativeChunkStoppedRef.current = true; // prevent any queued interval callback from racing
-      clearInterval(nativeChunkTimerRef.current);
-      nativeChunkTimerRef.current = null;
-    }
-    if (meteringPollTimerRef.current) {
-      clearInterval(meteringPollTimerRef.current);
-      meteringPollTimerRef.current = null;
-    }
+
+    clearTimers();
 
     try {
       safeSetState('uploading');
@@ -477,163 +501,104 @@ export function useRecordingUpload() {
       const elapsed = Date.now() - startedAtRef.current;
       if (elapsed < MIN_RECORDING_MS) await sleep(MIN_RECORDING_MS - elapsed);
 
-      const formData = new FormData();
-      let durationSec: number;
-
-      if (webHandle) {
-        const { durationMillis } = await webHandle.stop();
-        durationSec = Math.max(1, Math.round(durationMillis / 1000));
-      } else if (recording) {
-        // Capture peak dB for the final window before stopping (metering poll has been cleared).
-        let finalPeakDb: number = windowPeakDbRef.current;
+      // Flush the tail while the refs still point at the live sinks, then stop
+      // capture and release everything.
+      batcherRef.current?.flushPartial();
+      batcherRef.current = null;
+      if (webMic) webMic.stop();
+      if (wasNative) {
         try {
-          const meteringNow = recording.getStatus().metering;
-          if (typeof meteringNow === 'number' && !Number.isNaN(meteringNow)) {
-            finalPeakDb = Math.max(windowPeakDbRef.current, meteringNow);
-          }
-        } catch {
-          finalPeakDb = windowPeakDbRef.current;
-        }
+          nativeStream.stream.stop();
+        } catch {}
+      }
+      await releaseIosRecordSession();
 
-        let stopError: unknown = null;
+      clientRef.current = null;
+      webMicRef.current = null;
+      nativeActiveRef.current = false;
+      bufferRef.current = null;
+      prerollRef.current = null;
+
+      const sessionId = sessionIdRef.current;
+      if (!sessionId) {
+        throw new Error('Recording session was not created — nothing to finalize.');
+      }
+      const durationSec = Math.max(1, Math.round((Date.now() - startedAtRef.current) / 1000));
+      const hasTranscript = postedSegmentsRef.current > 0;
+
+      // `stop()` sends bye and waits for the sidecar's final flush; pending
+      // segment checkpoints are drained inside.
+      safeSetProgress(0.2);
+      if (client) await client.stop();
+
+      // Deliver the crash-safe local copy: always the audio archive, and the
+      // transcript source whenever the stream was incomplete or never attached
+      // (chooseTranscriptSource on the server decides which).
+      let delivered = false;
+      if (buffer) {
+        safeSetProgress(0.25);
         try {
-          await recording.stop();
-        } catch (err) {
-          stopError = err;
-        }
-
-        // Put the iOS session back to playback before anything else can fail.
-        await releaseIosRecordSession();
-
-        if (stopError) {
-          throw new Error(
-            `Recording could not be finalised: ${
-              stopError instanceof Error ? stopError.message : String(stopError)
-            }`,
-          );
-        }
-
-        durationSec = Math.max(
-          1,
-          Math.round((Date.now() - startedAtRef.current) / 1000),
-        );
-
-        // Enqueue final native segment (or silent marker if below threshold).
-        if (activeSessionIdRef.current) {
-          const finalIdx = chunkIndexCounterRef.current++;
-          const now = Date.now();
-          const finalDurationMs = now - chunkStartTimeRef.current;
-          const offsetMs = Math.max(0, chunkStartTimeRef.current - startedAtRef.current);
-
-          const isFinalSilent = finalPeakDb === -Infinity || finalPeakDb < SILENCE_DB_THRESHOLD;
-          console.log(`[Native Chunking] Final Chunk ${finalIdx}: finalPeakDb=${finalPeakDb.toFixed(1)} dBFS, silent=${isFinalSilent}`);
-
-          if (isFinalSilent) {
-            chunkUploadQueue.enqueue({
-              recordingId: activeSessionIdRef.current,
-              chunkIndex: finalIdx,
-              offsetMs,
-              duration: Math.max(0.1, finalDurationMs / 1000),
-              silent: true,
-              attempts: 0,
+          const file = await buffer.finalize();
+          if (file.bytes > 44 && file.durationSec >= 0.5) {
+            const gapMs = client ? (client.unackedFrames + client.droppedFrames) * 100 : null;
+            const result = await deliverLocalBuffer({
+              recordingId: sessionId,
+              buffer,
+              file,
+              gapMs,
+              prefer: 'auto',
+              createdAt: new Date(startedAtRef.current).toISOString(),
             });
+            if (result.status === 'delivered' || result.status === 'already' || result.status === 'skipped') {
+              delivered = true;
+              await buffer.discard().catch(() => {});
+            } else {
+              console.warn(`[Recovery] delivery deferred (${result.error ?? 'unknown'}); buffer kept`);
+            }
           } else {
-            const uri = recording.uri;
-            if (!uri) {
-              console.error('[stopAndUpload] Final native segment has no URI — last audio segment will be missing.', {
-                sessionId: activeSessionIdRef.current,
-              });
-            }
-            if (uri) {
-              chunkUploadQueue.enqueue({
-                recordingId: activeSessionIdRef.current,
-                chunkIndex: finalIdx,
-                offsetMs,
-                duration: Math.max(0.1, finalDurationMs / 1000),
-                uri,
-                attempts: 0,
-              });
-            }
+            await buffer.discard().catch(() => {});
           }
+        } catch (err) {
+          console.warn('[Recovery] delivery failed; buffer kept:', err);
         }
-      } else {
-        return;
       }
 
-      const currentSessionId = activeSessionIdRef.current;
       const controller = new AbortController();
       abortRef.current = controller;
 
-      let targetRecordingId: string;
-
-      if (currentSessionId) {
-        // Wait for any in-flight chunks to drain
-        safeSetProgress(0.2);
-        await chunkUploadQueue.drain();
-
-        // Finalize the live session
+      if (!delivered) {
+        if (!hasTranscript) {
+          // Nothing durable exists yet: do not finalize into an empty
+          // recording. The buffer stays on this device and the sweep retries.
+          throw new Error(
+            'Recording saved on this device — it will sync automatically when the connection returns.',
+          );
+        }
         safeSetProgress(0.3);
-        const finRes = await fetch(apiUrl(`/api/recordings/${encodeURIComponent(currentSessionId)}/finalize`), {
+        const finRes = await fetch(apiUrl(`/api/recordings/${encodeURIComponent(sessionId)}/finalize`), {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            totalExpectedChunks: chunkIndexCounterRef.current,
-            duration: durationSec,
-          }),
+          body: JSON.stringify({ duration: durationSec }),
         });
-
         if (!finRes.ok) {
           throw new Error(`Session finalize failed (${finRes.status}): ${await readError(finRes)}`);
         }
-
-        if (typeof window !== 'undefined' && window.localStorage) {
-          try {
-            window.localStorage.removeItem(ACTIVE_SESSION_STORAGE_KEY);
-          } catch {}
-        }
-        activeSessionIdRef.current = null;
-        targetRecordingId = currentSessionId;
-      } else {
-        formData.append('duration', String(durationSec));
-        formData.append('clientTimestamp', startTimestampRef.current);
-
-        const snapshot = await raceLocation(locationPromiseRef.current);
-        locationPromiseRef.current = null;
-        if (snapshot) {
-          formData.append('lat', String(snapshot.coords.lat));
-          formData.append('lng', String(snapshot.coords.lng));
-          if (snapshot.placeName) formData.append('placeName', snapshot.placeName);
-        }
-
-        safeSetProgress(0.3);
-
-        // No Content-Type header: the runtime must generate the multipart boundary.
-        let uploadRes: Response;
-        try {
-          uploadRes = await fetch(apiUrl('/api/recordings/upload'), {
-            method: 'POST',
-            body: formData,
-            signal: controller.signal,
-          });
-        } catch (err) {
-          throw new Error(describeRequestError(err, 'Upload failed'));
-        }
-
-        if (!uploadRes.ok) {
-          throw new Error(`Upload failed (${uploadRes.status}): ${await readError(uploadRes)}`);
-        }
-
-        const uploaded = (await uploadRes.json()) as UploadResponse;
-        targetRecordingId = uploaded.id;
       }
+
+      if (typeof window !== 'undefined' && window.localStorage) {
+        try {
+          window.localStorage.removeItem(ACTIVE_SESSION_STORAGE_KEY);
+        } catch {}
+      }
+      sessionIdRef.current = null;
 
       safeSetProgress(PROGRESS_BY_STATUS.uploaded);
       safeSetState('processing');
 
-      await drivePipeline(targetRecordingId, controller.signal, safeSetProgress);
+      await drivePipeline(sessionId, controller.signal, safeSetProgress);
 
       if (!mountedRef.current) return;
-      setResult({ id: targetRecordingId });
+      setResult({ id: sessionId });
       setProgress(1);
       setState('done');
 
@@ -642,6 +607,8 @@ export function useRecordingUpload() {
         if (!mountedRef.current) return;
         setState((s) => (s === 'done' ? 'idle' : s));
         setProgress((p) => (p === 1 ? 0 : p));
+        setLiveTranscript('');
+        setStreamState('idle');
       }, AUTO_RESET_MS);
     } catch (err) {
       await releaseIosRecordSession();
@@ -651,8 +618,9 @@ export function useRecordingUpload() {
       }
     } finally {
       abortRef.current = null;
+      stoppingRef.current = false;
     }
-  }, [safeSetProgress, safeSetState]);
+  }, [clearTimers, nativeStream, safeSetProgress, safeSetState]);
 
   useEffect(() => {
     stopRef.current = () => {
@@ -664,20 +632,92 @@ export function useRecordingUpload() {
     clearTimers();
     abortRef.current?.abort();
     abortRef.current = null;
-    await teardownRecorder();
+    await teardownCapture();
     await releaseIosRecordSession();
-    locationPromiseRef.current = null;
+    sessionIdRef.current = null;
+    finalizedTextRef.current = '';
+    partialTextRef.current = '';
+    // Retry any delivery that was deferred while offline.
+    void sweepPendingBuffers();
     if (!mountedRef.current) return;
     setState('idle');
     setError(null);
     setResult(null);
     setProgress(0);
-  }, [clearTimers, teardownRecorder]);
+    setLiveTranscript('');
+    setStreamState('idle');
+  }, [clearTimers, teardownCapture]);
 
-  return { state, error, result, progress, startRecording, stopAndUpload, reset };
+  return {
+    state,
+    error,
+    result,
+    progress,
+    liveTranscript,
+    streamState,
+    startRecording,
+    stopAndUpload,
+    reset,
+  };
 }
 
-// ─── Recording configuration ─────────────────────────────────────────────────
+// ─── Local-buffer sweep ──────────────────────────────────────────────────────
+// Deliver whatever a crash or an offline session left in the local buffer.
+// Only server-confirmed deliveries delete the buffer; everything else is left
+// for the next launch (or the next recorder reset).
+
+async function sweepPendingBuffers(): Promise<void> {
+  let ids: string[] = [];
+  try {
+    ids = await listPendingBuffers();
+  } catch (err) {
+    console.warn('[Recovery] could not list local buffers:', err);
+    return;
+  }
+  for (const id of ids) {
+    await deliverOneBuffer(id);
+  }
+}
+
+async function deliverOneBuffer(recordingId: string): Promise<boolean> {
+  try {
+    const buffer = await openExistingBuffer(recordingId);
+    const file = await buffer.finalize();
+    if (file.bytes <= 44 || file.durationSec < 0.5) {
+      // Header only — a start that never captured.
+      await buffer.discard().catch(() => {});
+      return true;
+    }
+    const result = await deliverLocalBuffer({
+      recordingId,
+      buffer,
+      file,
+      gapMs: null, // unknown after a crash: the server prefers the full file
+      prefer: 'auto',
+    });
+    if (result.status === 'delivered' || result.status === 'already' || result.status === 'skipped') {
+      await buffer.discard().catch(() => {});
+      void tickPipelineOnce(recordingId);
+      return true;
+    }
+    console.warn(`[Recovery] ${recordingId}: delivery deferred (${result.error ?? 'unknown'})`);
+    return false;
+  } catch (err) {
+    console.warn(`[Recovery] ${recordingId}: not deliverable yet:`, err);
+    return false;
+  }
+}
+
+/** A nudge; the Recordings list ticks non-terminal rows anyway. */
+async function tickPipelineOnce(recordingId: string): Promise<void> {
+  try {
+    await fetch(apiUrl(`/api/recordings/${encodeURIComponent(recordingId)}/process`), { method: 'POST' });
+  } catch {
+    // Best effort.
+  }
+}
+
+// ─── Audio session configuration ─────────────────────────────────────────────
 
 const RECORD_AUDIO_MODE = {
   allowsRecording: true,
@@ -693,31 +733,6 @@ const PLAYBACK_AUDIO_MODE = {
   interruptionMode: 'mixWithOthers' as const,
 };
 
-/**
- * Speech-grade AAC. Native only — web recording is driven directly by
- * lib/webRecorder.ts. expo-audio validates the android and ios blocks
- * even though only one of them applies to the running platform.
- */
-function recordingOptions(): RecordingOptions {
-  return {
-    isMeteringEnabled: true,
-    extension: '.m4a',
-    sampleRate: 22050,
-    numberOfChannels: 1,
-    bitRate: 32000,
-    android: {
-      outputFormat: 'mpeg4' as const,
-      audioEncoder: 'aac' as const,
-    },
-    ios: {
-      outputFormat: IOSOutputFormat.MPEG4AAC,
-      audioQuality: AudioQuality.MEDIUM,
-      bitDepthHint: 16,
-    },
-    web: { bitsPerSecond: 32000 },
-  };
-}
-
 /** Reverts the iOS audio session so playback returns to the loudspeaker. */
 async function releaseIosRecordSession(): Promise<void> {
   try {
@@ -727,79 +742,29 @@ async function releaseIosRecordSession(): Promise<void> {
   }
 }
 
-// ─── Upload helpers ──────────────────────────────────────────────────────────
-
-function uploadShapeFor(rawMime: string): { ext: string; mime: string } {
-  const shape = UPLOAD_SHAPE_BY_MIME[normalizeMime(rawMime)];
-  if (shape) return shape;
-  throw new Error(
-    `Recorded audio is "${normalizeMime(rawMime) || 'unknown'}", which the transcription service does not accept. ` +
-      'Supported: m4a/aac, ogg, wav, mp3.',
-  );
-}
-
-function normalizeMime(rawMime: string): string {
-  return (rawMime || '').split(';')[0].trim().toLowerCase();
-}
+// ─── Helpers ─────────────────────────────────────────────────────────────────
 
 /**
- * Returns the blob to upload. A recording already in a container Docling's ASR
- * pipeline reads is passed through untouched, keeping its compression; anything
- * else — in practice Chrome's WebM, which Docling classifies as video — is
- * decoded and re-encoded as 16 kHz mono WAV.
+ * Best-effort: the location snapshot resolves after capture has started, so it
+ * is patched onto the session instead of delaying it. A failure here must
+ * never surface as a recording error.
  */
-async function prepareWebUpload(recorded: Blob): Promise<{ blob: Blob; ext: string; mime: string }> {
-  const shape = UPLOAD_SHAPE_BY_MIME[normalizeMime(recorded.type)];
-  if (shape) return { blob: recorded, ext: shape.ext, mime: shape.mime };
-
-  const wav = await transcodeToWav(recorded);
-  return { blob: wav.blob, ext: wav.ext, mime: wav.mime };
-}
-
-function assertUploadSize(bytes: number, durationSec: number, limit: number): void {
-  if (bytes === 0) {
-    throw new Error('The recording is empty — no audio was captured.');
-  }
-  if (bytes > limit) {
-    throw new Error(
-      `This ${Math.round(durationSec / 60)}-minute recording is ${(bytes / 1e6).toFixed(1)} MB, over the ${(
-        limit / 1e6
-      ).toFixed(1)} MB upload limit. Record shorter walks for now.`,
-    );
-  }
-}
-
-/**
- * The ceiling depends on where the API runs, not on the client, so it is read
- * from the server and cached. A failure here must not block an upload: the
- * server enforces the real limit and returns a 413 the client already surfaces.
- */
-let cachedMaxUploadBytes: number | null = null;
-async function fetchMaxUploadBytes(): Promise<number> {
-  if (cachedMaxUploadBytes !== null) return cachedMaxUploadBytes;
+async function patchLocation(sessionId: string, snapshot: LocationSnapshot | null): Promise<void> {
+  if (!snapshot) return;
+  const body: Record<string, number | string> = {
+    lat: snapshot.coords.lat,
+    lng: snapshot.coords.lng,
+  };
+  if (snapshot.placeName) body.placeName = snapshot.placeName;
   try {
-    const res = await fetch(apiUrl('/api/recordings/upload'));
-    if (res.ok) {
-      const caps = (await res.json()) as { maxUploadBytes?: number };
-      if (typeof caps.maxUploadBytes === 'number' && caps.maxUploadBytes > 0) {
-        cachedMaxUploadBytes = caps.maxUploadBytes;
-        return cachedMaxUploadBytes;
-      }
-    }
-  } catch {
-    // Offline or CORS-blocked: fall back and let the upload itself report it.
+    await fetch(apiUrl(`/api/recordings/${encodeURIComponent(sessionId)}`), {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+  } catch (err) {
+    console.warn('[Location] Could not patch session location:', err);
   }
-  return FALLBACK_MAX_UPLOAD_BYTES;
-}
-
-async function raceLocation(
-  pending: Promise<LocationSnapshot | null> | null,
-): Promise<LocationSnapshot | null> {
-  if (!pending) return null;
-  return Promise.race([
-    pending.catch(() => null),
-    sleep(LOCATION_WAIT_MS).then(() => null),
-  ]);
 }
 
 /**

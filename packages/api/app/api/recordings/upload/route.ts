@@ -27,21 +27,10 @@ import {
 import { isAstraHibernatingError } from '@walfly/db';
 import { deleteAudio, storageMode, storeAudio } from '@/lib/storage';
 import { createRecording } from '@/lib/store';
+import { maxUploadBytes } from '@/lib/uploadLimits';
 
 export const runtime = 'nodejs';
 export const maxDuration = 60;
-
-/**
- * Vercel rejects a larger request body at the routing layer, before this
- * handler runs, with an HTML 413. That is a platform limit on the request — not
- * a storage limit — so it applies whenever we are deployed there, regardless of
- * where the bytes end up. A local server has no such cap, and needs the
- * headroom: browsers that can only record WebM upload 16 kHz mono WAV instead,
- * which is uncompressed at ~32 KB/s against Opus's ~4 KB/s.
- */
-function maxUploadBytes(): number {
-  return process.env.VERCEL ? 4_000_000 : 100_000_000;
-}
 
 interface UploadCapabilities {
   maxUploadBytes: number;

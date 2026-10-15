@@ -11,3 +11,9 @@ services:
       initial_delay_seconds: 10
       period_seconds: 15
       timeout_seconds: 5
+    envs:
+      - key: ASR_WORKERS
+        value: "2"
+      - key: ASR_CPU_THREADS
+        value: "2"
+      # WALFLY_WS_SECRET must be set as an encrypted env var (shared with the API).

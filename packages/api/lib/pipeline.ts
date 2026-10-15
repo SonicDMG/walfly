@@ -27,7 +27,7 @@
  * after()/waitUntil anywhere in this codebase.
  */
 
-import type { PipelineStage, RecordingStatus } from '@walfly/db';
+import type { PipelineStage, RecordingStatus, TranscriptSource } from '@walfly/db';
 import { enrichTranscript, detectMusicFromTranscript } from './enrich';
 import {
   acquireLease, getPipelineRecord, recordTransientFailure,
@@ -53,6 +53,8 @@ export interface AdvanceResult {
   stage: PipelineStage;
   error: string | null;
   retryAfterMs: number;
+  /** Which artifact the transcript comes from; null until known. */
+  transcriptSource?: TranscriptSource | null;
 }
 
 export async function advanceRecording(id: string): Promise<AdvanceResult> {
@@ -70,7 +72,10 @@ export async function advanceRecording(id: string): Promise<AdvanceResult> {
     attempts = record.attempts;
 
     if (record.status === 'ready' || record.status === 'failed') {
-      return { found: true, id, status: record.status, stage: 'done', error: null, retryAfterMs: 0 };
+      return {
+        found: true, id, status: record.status, stage: 'done', error: null, retryAfterMs: 0,
+        transcriptSource: record.transcriptSource ?? null,
+      };
     }
 
     // Live session currently recording: wait for finalize
@@ -81,13 +86,18 @@ export async function advanceRecording(id: string): Promise<AdvanceResult> {
     // ---- uploaded → transcribe or transition live session to enrich ------
     if (record.status === 'uploaded') {
       stage = 'transcribe';
-      if (!(await acquireLease(id, 'uploaded', LEASE_TRANSCRIBE_MS))) {
-        return waiting(id, 'uploaded', 'transcribe', 2000);
-      }
 
-      // If this was a live session, chunks have already been transcribed incrementally.
+      // A live session streamed its transcript through the sidecar: the
+      // segments are already durable in Astra, so there is no ASR step and
+      // nothing to lease — UNLESS recovery attached a complete local file that
+      // the streamed transcript no longer represents (`transcriptSource:
+      // 'batch'`), in which case the file is transcribed like any upload.
+      const needsAsr = !record.isLiveSession || record.transcriptSource === 'batch';
       let markdown = record.transcript;
-      if (!record.isLiveSession) {
+      if (needsAsr) {
+        if (!(await acquireLease(id, 'uploaded', LEASE_TRANSCRIBE_MS))) {
+          return waiting(id, 'uploaded', 'transcribe', 2000);
+        }
         markdown = await transcribeAudio(record.audioUrl);
       }
 
@@ -97,7 +107,10 @@ export async function advanceRecording(id: string): Promise<AdvanceResult> {
 
       await storeTranscript(id, markdown);
       console.log(`[pipeline] ${id} transcript stored (${markdown.length} chars)`);
-      return { found: true, id, status: 'enriching', stage: 'enrich', error: null, retryAfterMs: 1000 };
+      return {
+        found: true, id, status: 'enriching', stage: 'enrich', error: null, retryAfterMs: 1000,
+        transcriptSource: record.transcriptSource ?? (record.isLiveSession ? 'stream' : 'batch'),
+      };
     }
 
     // ---- enriching -------------------------------------------------------
@@ -118,7 +131,10 @@ export async function advanceRecording(id: string): Promise<AdvanceResult> {
       }
       await storeEnrichment(id, record.transcript, enrichment, undefined);
       console.log(`[pipeline] ${id} ready — "${enrichment.title}"`);
-      return { found: true, id, status: 'ready', stage: 'done', error: null, retryAfterMs: 0 };
+      return {
+        found: true, id, status: 'ready', stage: 'done', error: null, retryAfterMs: 0,
+        transcriptSource: record.transcriptSource ?? (record.isLiveSession ? 'stream' : 'batch'),
+      };
     }
 
     // An unrecognised status. Documents written before the pipeline was
@@ -193,6 +209,13 @@ function isRetryable(err: unknown): boolean {
 
   // LLM returned malformed JSON — model misfire, worth retrying.
   if (err.message.includes('LLM enrichment returned unparseable JSON')) return true;
+
+  // The OpenAI SDK wraps network failures as APIConnectionError /
+  // APIConnectionTimeoutError ("Connection error."). The LLM proxy is often the
+  // flakiest hop, and the lease already bounds the retry cost — treat these like
+  // the socket errors below instead of failing the recording terminally.
+  if (/APIConnection|Connection|Timeout/i.test(err.name)) return true;
+  if (/Connection error/i.test(err.message)) return true;
 
   // AbortSignal.timeout, undici socket errors, and the Astra driver's own
   // timeout/http wrappers all surface as one of these.

@@ -10,4 +10,9 @@ services:
         value: 8888
       - key: PYTHONUNBUFFERED
         value: "1"
+      - key: ASR_WORKERS
+        value: "2"
+      - key: ASR_CPU_THREADS
+        value: "2"
+      # WALFLY_WS_SECRET must be set in the Render dashboard (shared with the API).
     healthCheckPath: /health

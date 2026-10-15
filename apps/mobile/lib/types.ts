@@ -45,6 +45,21 @@ export interface RecordingChunk {
 
 export type RecordingStatus = 'recording' | 'uploaded' | 'transcribing' | 'enriching' | 'ready' | 'failed';
 
+/** Which artifact produced the durable transcript; absent on legacy docs. */
+export type TranscriptSource = 'stream' | 'batch';
+
+/** Attach record for audio delivered from the device's local buffer. */
+export interface RecordingRecovery {
+  source: 'local-buffer';
+  attachedAt: string;
+  pathname: string;
+  bytes: number;
+  durationSec: number;
+  gapMs: number | null;
+  attempts: number;
+  clientAttempts?: number;
+}
+
 export type PipelineStage = 'submit' | 'transcribe' | 'enrich' | 'done';
 
 export const NON_TERMINAL_STATUSES: readonly RecordingStatus[] = [
@@ -84,6 +99,9 @@ export interface Recording {
   checkpointSeq?: number;
   totalExpectedChunks?: number;
   receivedChunks?: number;
+  lastChunkIndex?: number;
+  transcriptSource?: TranscriptSource;
+  recover?: RecordingRecovery;
   chunks?: RecordingChunk[];
   music?: MusicDetection;
 }
@@ -110,6 +128,9 @@ export interface RecordingPatch {
   tags?: string[];
   notes?: string;
   placeName?: string;
+  /** Live sessions patch coordinates in when the location resolves late. */
+  lat?: number;
+  lng?: number;
 }
 
 /** GET /api/recordings/upload */
@@ -134,6 +155,7 @@ export interface ProcessResponse {
   stage: PipelineStage;
   error: string | null;
   retryAfterMs: number;
+  transcriptSource: TranscriptSource | null;
 }
 
 export interface ApiError {

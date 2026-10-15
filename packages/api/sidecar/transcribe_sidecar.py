@@ -1,471 +1,412 @@
-"""
-transcribe_sidecar.py
+"""Walfly ASR sidecar — FastAPI application.
 
-Minimal FastAPI sidecar that imports docling directly and exposes three
-endpoints that mirror the docling-serve v1 async API shape:
+Endpoints:
+  GET  /health              — liveness + model readiness
+  POST /v1/transcribe       — whole-file transcription (non-live recordings)
+  WS   /v1/stream           — live streaming transcription (the new path)
+  GET  /metrics             — Prometheus text format, token-gated
 
-  POST /v1/convert/file/async   — accepts multipart audio, returns task_id
-  GET  /v1/status/poll/{id}     — returns task_status
-  GET  /v1/result/{id}          — returns md_content
+Run locally (repo root):
+  uv run --project packages/api/sidecar python packages/api/sidecar/transcribe_sidecar.py
 
-This lets the existing Next.js transcribe.ts work without any protocol
-change — only DOCLING_SERVICE_URL needs to point here instead of docling-serve.
-
-Run with:
-  uv run python transcribe_sidecar.py
-  # or
-  uv run uvicorn transcribe_sidecar:app --port 5001
-
-Dependencies (pyproject.toml):
-  fastapi, uvicorn[standard], python-multipart, docling[asr]
+The streaming design lives in `streaming-plan.md` (repo root); evidence in
+`research_notes/Streaming audio sidecar/`.
 """
 
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
 import os
+import queue
 import struct
-import tempfile
-import threading
+import time
 import uuid
-from enum import Enum
-from pathlib import Path
-from typing import Any
+from contextlib import asynccontextmanager
 
+import numpy as np
 import uvicorn
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
-from fastapi.responses import JSONResponse
+from fastapi import FastAPI, File, HTTPException, UploadFile, WebSocket
+from fastapi.responses import JSONResponse, PlainTextResponse
+
+from walfly_asr import protocol
+from walfly_asr.asr import FILE, AsrPool, DecodeJob
+from walfly_asr.auth import TicketValidator
+from walfly_asr.config import load_settings
+from walfly_asr.markdown import render_markdown
+from walfly_asr.resample import PcmResampler
+from walfly_asr.session import StreamSession
 
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s - %(message)s",
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
 log = logging.getLogger("sidecar")
 
-app = FastAPI(title="Walfly Transcription Sidecar", version="1.0.0")
+settings = load_settings()
+validator = TicketValidator(settings.ws_secret)
+pool = AsrPool(settings)
 
-# ---------------------------------------------------------------------------
-# In-memory task store
-# ---------------------------------------------------------------------------
-
-class TaskStatus(str, Enum):
-    PENDING = "pending"
-    SUCCESS = "success"
-    FAILURE = "failure"
+_sessions: dict[str, StreamSession] = {}
+_sessions_lock = asyncio.Lock()
+_counters = {"sessions_total": 0, "segments_total": 0, "gaps_total": 0, "rejects_total": 0}
 
 
-_tasks: dict[str, dict[str, Any]] = {}
-_tasks_lock = threading.Lock()
+# ── lifecycle ────────────────────────────────────────────────────────────────
+
+async def _reaper_loop() -> None:
+    while True:
+        await asyncio.sleep(60)
+        now = time.monotonic()
+        async with _sessions_lock:
+            for session_id, session in list(_sessions.items()):
+                if session.attached:
+                    continue
+                idle_for = now - session.last_activity
+                if idle_for > settings.session_ttl_s or idle_for > settings.max_session_s:
+                    session.request_stop()
+                    session.shutdown()
+                    del _sessions[session_id]
 
 
-def _create_task() -> str:
-    task_id = str(uuid.uuid4())
-    with _tasks_lock:
-        _tasks[task_id] = {"status": TaskStatus.PENDING, "markdown": None, "error": None}
-    return task_id
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    pool.start()
+    asyncio.get_running_loop().create_task(_reaper_loop())
+    # Do not block startup on model load (Fly healthchecks); report readiness via /health.
+    asyncio.get_running_loop().create_task(_log_model_readiness())
+    yield
+    async with _sessions_lock:
+        for session in _sessions.values():
+            session.request_stop()
+            await asyncio.to_thread(session.wait_finished, 10)
+            session.shutdown()
+        _sessions.clear()
+    pool.shutdown()
 
 
-def _set_success(task_id: str, markdown: str) -> None:
-    with _tasks_lock:
-        _tasks[task_id]["status"] = TaskStatus.SUCCESS
-        _tasks[task_id]["markdown"] = markdown
+app = FastAPI(title="Walfly ASR Sidecar", version="0.2.0", lifespan=lifespan)
 
 
-def _set_failure(task_id: str, error: str) -> None:
-    with _tasks_lock:
-        _tasks[task_id]["status"] = TaskStatus.FAILURE
-        _tasks[task_id]["error"] = error
+async def _log_model_readiness() -> None:
+    ready = await asyncio.to_thread(pool.wait_until_ready, 600)
+    log.info("ASR pool ready=%s (%s workers, model=%s)", ready, settings.workers, settings.model)
 
 
-def _get_task(task_id: str) -> dict[str, Any] | None:
-    with _tasks_lock:
-        return _tasks.get(task_id)
-
-
-# ---------------------------------------------------------------------------
-# Timestamp extraction + markdown formatting
-# ---------------------------------------------------------------------------
-
-def _fmt_time(seconds: float) -> str:
-    """Format seconds as M:SS.S — matches the [time: a-b] format the app expects."""
-    m = int(seconds // 60)
-    s = seconds % 60
-    return f"{m}:{s:04.1f}"
-
-
-def _build_timestamped_markdown(document: object) -> str:
-    """Extract per-segment timestamps from DoclingDocument and emit [time: a-b] lines.
-
-    Falls back to plain export_to_markdown() if no TrackSource timestamps are found.
-    """
-    lines: list[str] = []
-
-    if hasattr(document, "texts"):
-        for text_item in document.texts:  # type: ignore[union-attr]
-            text = getattr(text_item, "text", "").strip()
-            if not text:
-                continue
-
-            start: float | None = None
-            end: float | None = None
-
-            source = getattr(text_item, "source", None)
-            sources = source if isinstance(source, list) else ([source] if source is not None else [])
-
-            for src in sources:
-                s = getattr(src, "start_time", None) or getattr(src, "start", None)
-                e = getattr(src, "end_time", None) or getattr(src, "end", None)
-                if s is not None:
-                    start = float(s)
-                    end = float(e) if e is not None else start
-                    break
-
-            if start is not None:
-                lines.append(f"[time: {_fmt_time(start)}-{_fmt_time(end)}] {text}")
-            else:
-                lines.append(text)
-
-    if lines:
-        log.info("Built timestamped markdown: %d segments", len(lines))
-        return "\n\n".join(lines)
-
-    # Fallback — no timestamps available
-    log.warning("No timestamps found in DoclingDocument, falling back to plain markdown")
-    return document.export_to_markdown()  # type: ignore[union-attr]
-
-
-# TODO: remove after client-side VAD gate confirmed in production
-# ---------------------------------------------------------------------------
-# Silence detection
-# ---------------------------------------------------------------------------
-
-# RMS amplitude below this threshold (on a 0–1 scale) is treated as silence.
-# Whisper Turbo hallucinates on silent input (e.g. repeated "the", "I can't do that").
-# 0.025 corresponds to approx -32 dBFS RMS, reliably cutting off ambient background/mic hiss.
-_SILENCE_RMS_THRESHOLD = 0.025
-
-# Minimum number of PCM samples required before we bother computing RMS.
-# Avoids a divide-by-zero on a zero-byte or malformed file.
-_MIN_SAMPLES_FOR_RMS = 64
-
-
-def _is_silent_audio(audio_path: Path) -> bool:
-    """Return True if the audio file (WAV, MP4/M4A, WebM, etc.) contains only silence.
-
-    First tries PyAV (`av`) to decode the audio stream and compute RMS amplitude across all formats.
-    Falls back to direct PCM WAV parsing if PyAV is unavailable or fails.
-    """
-    try:
-        import av
-        import numpy as np
-
-        with av.open(str(audio_path)) as container:
-            audio_streams = [s for s in container.streams if s.type == "audio"]
-            if not audio_streams:
-                return False
-
-            sum_squares = 0.0
-            total_samples = 0
-
-            for frame in container.decode(audio_streams[0]):
-                # Convert audio frame to float32 numpy array normalized to [-1.0, 1.0]
-                arr = frame.to_ndarray()
-                if arr.dtype == np.int16:
-                    float_arr = arr.astype(np.float32) / 32768.0
-                elif arr.dtype == np.int32:
-                    float_arr = arr.astype(np.float32) / 2147483648.0
-                elif arr.dtype == np.uint8:
-                    float_arr = (arr.astype(np.float32) - 128.0) / 128.0
-                elif np.issubdtype(arr.dtype, np.floating):
-                    float_arr = arr.astype(np.float32)
-                else:
-                    float_arr = arr.astype(np.float32)
-
-                sum_squares += float(np.sum(float_arr ** 2))
-                total_samples += float_arr.size
-
-            if total_samples < _MIN_SAMPLES_FOR_RMS:
-                return False
-
-            rms = (sum_squares / total_samples) ** 0.5
-            log.info("Audio silence check (PyAV): rms=%.5f threshold=%.5f file=%s",
-                     rms, _SILENCE_RMS_THRESHOLD, audio_path.name)
-            return rms < _SILENCE_RMS_THRESHOLD
-    except Exception as pyav_exc:
-        log.debug("PyAV decode failed or uninstalled (%s), attempting raw WAV parser fallback", pyav_exc)
-
-    try:
-        with audio_path.open("rb") as f:
-            header = f.read(44)
-
-        # WAV files start with RIFF…WAVE; reject anything else quickly.
-        if len(header) < 44 or header[:4] != b"RIFF" or header[8:12] != b"WAVE":
-            return False
-
-        # Parse enough of the canonical 44-byte PCM header to find bit depth.
-        bits_per_sample = struct.unpack_from("<H", header, 34)[0]
-        if bits_per_sample not in (8, 16, 24, 32):
-            return False
-
-        # Read the full file and skip to the "data" sub-chunk.
-        data = audio_path.read_bytes()
-        offset = 12  # skip RIFF header
-        data_payload = b""
-        while offset + 8 <= len(data):
-            chunk_id = data[offset:offset + 4]
-            chunk_size = struct.unpack_from("<I", data, offset + 4)[0]
-            if chunk_id == b"data":
-                data_payload = data[offset + 8: offset + 8 + chunk_size]
-                break
-            offset += 8 + chunk_size
-
-        if not data_payload:
-            return False
-
-        if bits_per_sample == 16:
-            fmt = "<" + "h" * (len(data_payload) // 2)
-            if len(data_payload) // 2 < _MIN_SAMPLES_FOR_RMS:
-                return False
-            samples = struct.unpack(fmt, data_payload[: (len(data_payload) // 2) * 2])
-            rms = (sum(s * s for s in samples) / len(samples)) ** 0.5 / 32768.0
-        elif bits_per_sample == 8:
-            samples = list(data_payload)
-            if len(samples) < _MIN_SAMPLES_FOR_RMS:
-                return False
-            # 8-bit WAV is unsigned, centre is 128
-            rms = (sum((s - 128) ** 2 for s in samples) / len(samples)) ** 0.5 / 128.0
-        else:
-            return False
-
-        log.debug("Silence check (raw WAV): rms=%.5f threshold=%.5f path=%s",
-                  rms, _SILENCE_RMS_THRESHOLD, audio_path.name)
-        return rms < _SILENCE_RMS_THRESHOLD
-
-    except Exception as exc:  # noqa: BLE001
-        log.warning("Silence check failed (%s) — treating as non-silent", exc)
-        return False
-
-
-# ---------------------------------------------------------------------------
-# Docling transcription (runs in a background thread)
-# ---------------------------------------------------------------------------
-
-def _run_transcription(task_id: str, audio_path: Path) -> None:
-    log.info("[%s] Starting docling transcription of %s (%d bytes)",
-             task_id, audio_path.name, audio_path.stat().st_size)
-
-    # Short-circuit: return an empty transcript rather than let Whisper
-    # hallucinate on a silent audio chunk (M4A, WAV, etc.).
-    if _is_silent_audio(audio_path):
-        log.info("[%s] Silence detected — skipping Whisper, returning empty transcript", task_id)
-        _set_success(task_id, "")
-        try:
-            audio_path.unlink(missing_ok=True)
-        except Exception:  # noqa: BLE001
-            pass
-        return
-
-    try:
-        import torch
-        from docling.datamodel import asr_model_specs
-        from docling.datamodel.base_models import InputFormat
-        from docling.datamodel.pipeline_options import AcceleratorOptions, AsrPipelineOptions
-        from docling.document_converter import AudioFormatOption, DocumentConverter
-        from docling.pipeline.asr_pipeline import AsrPipeline
-
-        # Docling's 'auto' mode misses MPS on Apple Silicon in some versions,
-        # so we resolve the best available device explicitly.
-        if torch.backends.mps.is_built() and torch.backends.mps.is_available():
-            _device = "mps"
-        elif torch.backends.cuda.is_built() and torch.cuda.is_available():
-            _device = "cuda"
-        else:
-            _device = "cpu"
-        log.info("[%s] Selected accelerator device: %s", task_id, _device)
-
-        pipeline_options = AsrPipelineOptions()
-        pipeline_options.asr_options = asr_model_specs.WHISPER_TURBO
-        pipeline_options.accelerator_options = AcceleratorOptions(device=_device)
-
-        converter = DocumentConverter(
-            format_options={
-                InputFormat.AUDIO: AudioFormatOption(
-                    pipeline_cls=AsrPipeline,
-                    pipeline_options=pipeline_options,
-                )
-            }
-        )
-
-        log.info("[%s] Running DocumentConverter with AsrPipeline (whisper-turbo)…", task_id)
-        result = converter.convert(audio_path)
-        markdown = _build_timestamped_markdown(result.document)
-
-        log.info("[%s] Transcription complete — %d chars", task_id, len(markdown))
-        _set_success(task_id, markdown)
-
-    except Exception as exc:  # noqa: BLE001
-        log.error("[%s] Transcription failed: %s", task_id, exc, exc_info=True)
-        _set_failure(task_id, str(exc))
-    finally:
-        # Clean up the temp file
-        try:
-            audio_path.unlink(missing_ok=True)
-        except Exception:  # noqa: BLE001
-            pass
-
-
-# ---------------------------------------------------------------------------
-# Routes
-# ---------------------------------------------------------------------------
+# ── HTTP ─────────────────────────────────────────────────────────────────────
 
 @app.get("/health")
-def health() -> dict[str, str]:
-    return {"status": "ok"}
-
-
-def _write_temp_audio(filename: str, audio_bytes: bytes) -> Path:
-    """Write audio bytes to a temp file, normalising .m4a → .mp4."""
-    raw_suffix = Path(filename or "recording.m4a").suffix or ".m4a"
-    suffix = ".mp4" if raw_suffix.lower() == ".m4a" else raw_suffix
-    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
-    tmp.write(audio_bytes)
-    tmp.close()
-    return Path(tmp.name)
-
-
-@app.post("/v1/convert/file/async")
-async def convert_file_async(
-    files: UploadFile = File(...),
-    to_formats: str = Form(default="md"),  # noqa: ARG001
-    target_type: str = Form(default="inbody"),  # noqa: ARG001
-) -> JSONResponse:
-    """Accept an audio file, enqueue transcription, return a task_id."""
-    audio_bytes = await files.read()
-    log.info("Received file: name=%s size=%d mime=%s",
-             files.filename, len(audio_bytes), files.content_type)
-
-    audio_path = _write_temp_audio(files.filename or "recording.m4a", audio_bytes)
-    task_id = _create_task()
-    log.info("Created task %s for %s", task_id, audio_path)
-
-    thread = threading.Thread(
-        target=_run_transcription,
-        args=(task_id, audio_path),
-        daemon=True,
-    )
-    thread.start()
-
-    return JSONResponse({"task_id": task_id})
+async def health() -> JSONResponse:
+    return JSONResponse({
+        "status": "ok",
+        "model": settings.model,
+        "compute": f"{settings.device}/{settings.compute_type}",
+        "workers": settings.workers,
+        "modelReady": pool.wait_until_ready(0.01),
+        "sessions": len(_sessions),
+    })
 
 
 @app.post("/v1/transcribe")
-async def transcribe_sync(files: UploadFile = File(...)) -> JSONResponse:
-    """Synchronous transcription — blocks until docling completes, returns markdown.
+async def transcribe_file(files: UploadFile = File(...)) -> JSONResponse:
+    """Whole-file transcription, contract-compatible with the old sidecar.
 
-    Used by the Next.js pipeline's single-call transcribeAudio() function.
-    Response: {"markdown": "..."}
+    Returns `{"markdown": "..."}` where each line is `[time: m:ss.s-m:ss.s] text`.
+    An empty string means the file contained no speech.
     """
     audio_bytes = await files.read()
-    log.info("[sync] Received file: name=%s size=%d mime=%s",
-             files.filename, len(audio_bytes), files.content_type)
+    log.info("transcribe request: name=%s size=%d", files.filename, len(audio_bytes))
+    if not audio_bytes:
+        raise HTTPException(status_code=400, detail="empty upload")
 
-    audio_path = _write_temp_audio(files.filename or "recording.m4a", audio_bytes)
-    task_id = _create_task()
-    log.info("[sync] Created task %s for %s", task_id, audio_path)
+    try:
+        audio = await asyncio.to_thread(_decode_file_audio, audio_bytes)
+    except Exception as exc:  # noqa: BLE001
+        log.exception("file decode failed: %s", exc)
+        raise HTTPException(status_code=415, detail=f"could not decode audio: {exc}") from exc
 
-    # Run in a thread and block until complete
-    done = threading.Event()
+    result_q: "queue.Queue" = queue.Queue()
+    job = DecodeJob(
+        session_id=f"file-{uuid.uuid4()}",
+        kind=FILE,
+        audio=audio,
+        result_q=result_q,
+        language=settings.language,
+    )
+    pool.submit(job)
+    try:
+        result = await asyncio.to_thread(result_q.get, True, 600)
+    except queue.Empty as exc:
+        raise HTTPException(status_code=504, detail="transcription timed out") from exc
 
-    def _run_and_signal() -> None:
-        _run_transcription(task_id, audio_path)
-        done.set()
-
-    threading.Thread(target=_run_and_signal, daemon=True).start()
-    done.wait()  # blocks the async handler — fine for a local sidecar
-
-    task = _get_task(task_id)
-    if task is None or task["status"] == TaskStatus.FAILURE:
-        error = (task or {}).get("error", "Transcription failed")
-        log.error("[sync] Task %s failed: %s", task_id, error)
-        raise HTTPException(status_code=500, detail=error)
-
-    markdown = task.get("markdown") or ""
-    log.info("[sync] Task %s complete — %d chars", task_id, len(markdown))
-
-    with _tasks_lock:
-        _tasks.pop(task_id, None)
-
+    markdown = render_markdown([s for s in result.segments if s.get("text")])
+    log.info("transcribe done: %d chars, %d segments", len(markdown), len(result.segments))
     return JSONResponse({"markdown": markdown})
 
 
-@app.get("/v1/status/poll/{task_id}")
-def poll_status(task_id: str) -> JSONResponse:
-    """Return the current task status in docling-serve poll format."""
-    task = _get_task(task_id)
-    if task is None:
-        raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
+def _decode_file_audio(audio_bytes: bytes) -> np.ndarray:
+    from faster_whisper.audio import decode_audio
 
-    status = task["status"]
-    log.info("Poll %s → %s", task_id, status)
+    import io
 
-    if status == TaskStatus.PENDING:
-        return JSONResponse({"task_id": task_id, "task_status": "pending", "error_message": None})
-    if status == TaskStatus.SUCCESS:
-        return JSONResponse({"task_id": task_id, "task_status": "success", "error_message": None})
-
-    # failure
-    return JSONResponse({
-        "task_id": task_id,
-        "task_status": "failure",
-        "error_message": task.get("error"),
-        "failure": {"message": task.get("error"), "retryable": False},
-    })
+    return decode_audio(io.BytesIO(audio_bytes), sampling_rate=settings.sample_rate)
 
 
-@app.get("/v1/result/{task_id}")
-def get_result(task_id: str) -> JSONResponse:
-    """Return the transcript markdown in docling-serve inbody format."""
-    task = _get_task(task_id)
-    if task is None:
-        raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
+# ── WebSocket streaming ──────────────────────────────────────────────────────
 
-    status = task["status"]
+@app.websocket("/v1/stream")
+async def stream(websocket: WebSocket) -> None:
+    loop = asyncio.get_running_loop()
+    subprotocols = list(websocket.scope.get("subprotocols") or [])
+    await websocket.accept(subprotocol=protocol.PROTOCOL_NAME if protocol.PROTOCOL_NAME in subprotocols else None)
 
-    if status == TaskStatus.PENDING:
-        raise HTTPException(status_code=425, detail="Task is still processing")
+    # ── auth ────────────────────────────────────────────────────────────────
+    origin = websocket.headers.get("origin")
+    if origin and not _origin_allowed(origin):
+        _counters["rejects_total"] += 1
+        await _close_with_error(websocket, protocol.CLOSE_AUTH, "origin not allowed")
+        return
+    token = validator.ticket_from_subprotocols(subprotocols)
+    ticket = validator.validate(token) if token else None
+    if ticket is None:
+        _counters["rejects_total"] += 1
+        await _close_with_error(websocket, protocol.CLOSE_AUTH, "missing or invalid ticket")
+        return
 
-    if status == TaskStatus.FAILURE:
-        return JSONResponse(
-            status_code=200,
-            content={
-                "kind": "TaskFailureResult",
-                "failure": {"message": task.get("error"), "retryable": False},
-            },
-        )
+    # ── hello ───────────────────────────────────────────────────────────────
+    try:
+        hello = await asyncio.wait_for(websocket.receive_json(), timeout=10)
+    except (asyncio.TimeoutError, ValueError):
+        await _close_with_error(websocket, protocol.CLOSE_IDLE, "hello timeout")
+        return
+    if hello.get("t") != "hello" or hello.get("sessionId") != ticket.session_id:
+        await _close_with_error(websocket, protocol.CLOSE_AUTH, "hello does not match ticket")
+        return
+    codec = hello.get("codec") or "pcm_s16le"
+    if codec != "pcm_s16le":
+        # `aac_adts` (Bee) is a planned extension; reject loudly rather than misparse.
+        await _close_with_error(websocket, protocol.CLOSE_INTERNAL, f"unsupported codec {codec!r}")
+        return
+    sample_rate = int(hello.get("sampleRate") or settings.sample_rate)
+    channels = int(hello.get("channels") or 1)
+    if channels != 1:
+        await _close_with_error(websocket, protocol.CLOSE_INTERNAL, "only mono is supported")
+        return
+    resume_from = -1
+    resume = hello.get("resume") or {}
+    try:
+        if resume.get("fromSeq") is not None:
+            resume_from = int(resume["fromSeq"])
+    except (TypeError, ValueError):
+        resume_from = -1
 
-    markdown = task.get("markdown") or ""
-    log.info("Result %s → %d chars", task_id, len(markdown))
+    # ── session ─────────────────────────────────────────────────────────────
+    session_id = ticket.session_id
+    reset = False
+    async with _sessions_lock:
+        existing = _sessions.get(session_id)
+        if existing is not None and existing.attached:
+            await _close_with_error(websocket, protocol.CLOSE_DUPLICATE, "session already streaming")
+            return
+        if existing is None:
+            if len(_sessions) >= settings.max_sessions:
+                await _close_with_error(websocket, protocol.CLOSE_OVERLOADED, "sidecar at capacity")
+                return
+            existing = StreamSession(
+                session_id=session_id,
+                settings=settings,
+                pool=pool,
+            )
+            _sessions[session_id] = existing
+            _counters["sessions_total"] += 1
+            existing.start()
+            reset = resume_from >= 0
+    session = existing
 
-    # Clean up from memory once fetched
-    with _tasks_lock:
-        _tasks.pop(task_id, None)
+    outbox: "asyncio.Queue[dict | None]" = asyncio.Queue()
+    writer = loop.create_task(_writer_loop(websocket, outbox))
 
-    return JSONResponse({
-        "document": {
-            "md_content": markdown,
-            "text_content": None,
-            "filename": "transcript.md",
-        },
-        "num_succeeded": 1,
-        "num_failed": 0,
-    })
+    def sink(message: dict) -> None:
+        try:
+            loop.call_soon_threadsafe(outbox.put_nowait, message)
+        except RuntimeError:
+            pass  # loop closed during teardown
+
+    session.set_sink(sink)
+    await websocket.send_text(protocol.dumps(protocol.ready(
+        session_id, sample_rate=settings.sample_rate,
+        resumed_from_seq=resume_from if resume_from >= 0 else None,
+        reset=reset,
+    )))
+    if resume_from >= 0:
+        session.replay(resume_from)
+
+    resampler = None if sample_rate == settings.sample_rate else PcmResampler(sample_rate)
+    expected_seq = resume_from if resume_from >= 0 else None
+    last_ack_sent = -1
+    close_code = protocol.CLOSE_CLEAN
+    reader_error: str | None = None
+
+    try:
+        while True:
+            try:
+                raw = await asyncio.wait_for(websocket.receive(), timeout=5)
+            except asyncio.TimeoutError:
+                if time.monotonic() - session.last_activity > settings.idle_timeout_s:
+                    close_code = protocol.CLOSE_IDLE
+                    session.request_stop()
+                    break
+                if session.queue_lag_ms() >= settings.queue_close_ms:
+                    close_code = protocol.CLOSE_OVERLOADED
+                    session.request_stop()
+                    break
+                if time.monotonic() - session.started_at > settings.max_session_s:
+                    session.request_stop()
+                    break
+                continue
+
+            kind = raw.get("type")
+            if kind == "websocket.disconnect":
+                break
+            if raw.get("bytes") is not None:
+                parsed = _parse_frame(raw["bytes"])
+                if parsed is None:
+                    reader_error = "bad frame"
+                    break
+                seq, _t_ms, payload = parsed
+                if expected_seq is not None and seq < expected_seq:
+                    continue  # duplicate after resume
+                if expected_seq is not None and seq > expected_seq:
+                    # The client's local buffer dropped frames under overload:
+                    # surface the hole explicitly (frames are 100 ms by contract).
+                    outbox.put_nowait(protocol.gap(expected_seq * 100, seq * 100))
+                expected_seq = seq + 1
+                samples = resampler.process(payload) if resampler else _pcm_to_float32(payload)
+                session.feed_audio(seq, samples)
+            elif raw.get("text") is not None:
+                try:
+                    message = json.loads(raw["text"])
+                except ValueError:
+                    continue
+                session.handle_control(message)
+                if message.get("t") == "bye":
+                    session.request_stop()
+                    break
+
+            # Ack what the processor has consumed (replay-safe boundary).
+            consumed = session.consumed_seq()
+            if consumed > last_ack_sent:
+                last_ack_sent = consumed
+                outbox.put_nowait(protocol.ack(consumed))
+    except Exception as exc:  # noqa: BLE001
+        log.exception("stream error for session %s: %s", session_id, exc)
+        close_code = protocol.CLOSE_INTERNAL
+    finally:
+        # On a stop, keep the sink attached until the processor has flushed the
+        # in-flight segment and sent `final`; only then detach and close.
+        if session.stop_requested or close_code != protocol.CLOSE_CLEAN:
+            await asyncio.to_thread(session.wait_finished, 30)
+        session.set_sink(None)
+        outbox.put_nowait(None)
+        try:
+            await asyncio.wait_for(writer, timeout=10)
+        except Exception:  # noqa: BLE001
+            writer.cancel()
+        if reader_error is not None:
+            close_code = protocol.CLOSE_INTERNAL
+        try:
+            await websocket.close(code=close_code)
+        except Exception:  # noqa: BLE001
+            pass
+        log.info("session %s closed (%d): %s", session_id, close_code, "consumer_done" if session.finished else "detached")
 
 
-# ---------------------------------------------------------------------------
-# Entrypoint
-# ---------------------------------------------------------------------------
+async def _writer_loop(websocket: WebSocket, outbox: "asyncio.Queue[dict | None]") -> None:
+    while True:
+        message = await outbox.get()
+        if message is None:
+            return
+        kind = message.get("t")
+        if kind == "segment":
+            _counters["segments_total"] += 1
+        elif kind == "gap":
+            _counters["gaps_total"] += 1
+        await websocket.send_text(protocol.dumps(message))
+
+
+async def _close_with_error(websocket: WebSocket, code: int, message: str) -> None:
+    try:
+        await websocket.send_text(protocol.dumps(protocol.error("auth" if code == protocol.CLOSE_AUTH else "protocol", message)))
+        await websocket.close(code=code)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _origin_allowed(origin: str) -> bool:
+    if "*" in settings.allowed_origins:
+        return True
+    normalized = origin.lower().split("://")[-1].rstrip("/")
+    return any(normalized == allowed.lower().split("://")[-1].rstrip("/") for allowed in settings.allowed_origins)
+
+
+def _parse_frame(raw: bytes) -> tuple[int, int, bytes] | None:
+    if len(raw) < protocol.HEADER_SIZE or len(raw) > protocol.MAX_FRAME_BYTES:
+        return None
+    seq, t_ms = struct.unpack_from("<II", raw, 0)
+    payload = raw[protocol.HEADER_SIZE:]
+    if len(payload) > protocol.MAX_PAYLOAD_BYTES or len(payload) == 0:
+        return None
+    return seq, t_ms, payload
+
+
+def _pcm_to_float32(payload: bytes) -> np.ndarray:
+    usable = len(payload) - (len(payload) % 2)
+    return np.frombuffer(payload[:usable], dtype="<i2").astype(np.float32) / 32768.0
+
+
+# ── metrics ──────────────────────────────────────────────────────────────────
+
+@app.get("/metrics")
+async def metrics(token: str | None = None) -> PlainTextResponse:
+    if not settings.metrics_token or token != settings.metrics_token:
+        raise HTTPException(status_code=404, detail="not found")
+    pool_metrics = pool.metrics()
+    lines = [
+        "# TYPE walfly_sessions_current gauge",
+        f"walfly_sessions_current {len(_sessions)}",
+        "# TYPE walfly_sessions_total gauge",
+        f"walfly_sessions_total {_counters['sessions_total']}",
+        "# TYPE walfly_segments_total gauge",
+        f"walfly_segments_total {_counters['segments_total']}",
+        "# TYPE walfly_gaps_total gauge",
+        f"walfly_gaps_total {_counters['gaps_total']}",
+        "# TYPE walfly_rejects_total gauge",
+        f"walfly_rejects_total {_counters['rejects_total']}",
+        "# TYPE walfly_model_ready gauge",
+        f"walfly_model_ready {1 if pool.wait_until_ready(0.01) else 0}",
+        "# TYPE walfly_decode_ms_total counter",
+        f"walfly_decode_ms_total {pool_metrics['decode_ms_total']:.1f}",
+        "# TYPE walfly_decode_audio_ms_total counter",
+        f"walfly_decode_audio_ms_total {pool_metrics['audio_ms_total']:.1f}",
+    ]
+    return PlainTextResponse("\n".join(lines) + "\n")
+
+
+# ── entrypoint ───────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    port = int(os.environ.get("SIDECAR_PORT", "8888"))
-    log.info("Starting transcription sidecar on port %d", port)
-    uvicorn.run(app, host="0.0.0.0", port=port)
+    # SIDECAR_PORT wins, then the platform-injected PORT, then the local default.
+    port = int(os.environ.get("SIDECAR_PORT", os.environ.get("PORT", "8888")))
+    log.info("Starting Walfly ASR sidecar on port %d (model=%s)", port, settings.model)
+    uvicorn.run(
+        app,
+        host="0.0.0.0",
+        port=port,
+        workers=1,  # in-memory sessions cannot span worker processes
+        ws_max_size=protocol.MAX_FRAME_BYTES * 2,
+        ws_per_message_deflate=False,
+        ws_ping_interval=20,
+        ws_ping_timeout=20,
+        log_level="info",
+    )

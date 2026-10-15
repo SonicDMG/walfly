@@ -107,6 +107,49 @@ export function describeRequestError(err: unknown, what: string): string {
   return `${what}: ${String(err)}`;
 }
 
+// ─── Streaming session helpers ───────────────────────────────────────────────
+
+/** 201 body of POST /api/recordings/{id}/ws-ticket */
+export interface StreamTicketResponse {
+  ticket: string;
+  url: string;
+  /** Epoch milliseconds when the ticket stops being accepted. */
+  expiresAt: number;
+}
+
+/** Body of POST /api/recordings/{id}/segments */
+export interface SegmentPayload {
+  chunkIndex: number;
+  startMs: number;
+  endMs: number;
+  text: string;
+}
+
+/** Mints a short-lived ticket for the ASR sidecar WebSocket. */
+export async function fetchWsTicket(recordingId: string): Promise<StreamTicketResponse> {
+  const res = await fetch(apiUrl(`/api/recordings/${encodeURIComponent(recordingId)}/ws-ticket`), {
+    method: 'POST',
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    throw new Error(`Could not start streaming (${res.status}): ${text.slice(0, 200)}`);
+  }
+  return (await res.json()) as StreamTicketResponse;
+}
+
+/** Checkpoints one finalized streamed segment. Resolves only on a 2xx. */
+export async function postSegment(recordingId: string, segment: SegmentPayload): Promise<void> {
+  const res = await fetch(apiUrl(`/api/recordings/${encodeURIComponent(recordingId)}/segments`), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(segment),
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    throw new Error(`Segment checkpoint failed (${res.status}): ${text.slice(0, 200)}`);
+  }
+}
+
 // ─── Wire types ──────────────────────────────────────────────────────────────
 // Defined in ./types and re-exported here so every screen and hook has a single
 // import site for both the transport helpers and the shapes they carry.
