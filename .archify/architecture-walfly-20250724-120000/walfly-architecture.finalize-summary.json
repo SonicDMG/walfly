@@ -1,0 +1,161 @@
+{
+  "schemaVersion": 1,
+  "ok": true,
+  "command": "finalize",
+  "status": "pass",
+  "type": "architecture",
+  "quality": "showcase",
+  "specification": {
+    "path": "/Users/davidjones-gilardi/walfly/.archify/architecture-walfly-20250724-120000/candidate.json",
+    "sha256": "a5fa270cb3dde13529a2c48cbe6d5a8b341b357d65933038ecae39ee8c3b4c69",
+    "bytes": 4023
+  },
+  "artifact": {
+    "path": "/Users/davidjones-gilardi/walfly/.archify/architecture-walfly-20250724-120000/walfly-architecture.html",
+    "sha256": "e0923da2b86e07005ca5d6ba3243d0c6c1cf1862cb307c237a2fd12613d3bab3",
+    "bytes": 823808
+  },
+  "gates": {
+    "validate": "pass",
+    "deliver": "pass",
+    "check": "pass",
+    "browser-check": "pass"
+  },
+  "diagnostics": [],
+  "diagnosticSummary": {
+    "total": 0,
+    "shown": 0,
+    "truncated": false
+  },
+  "evidence": {
+    "receipt": "/Users/davidjones-gilardi/walfly/.archify/architecture-walfly-20250724-120000/walfly-architecture.finalize.json",
+    "summaryReceipt": "/Users/davidjones-gilardi/walfly/.archify/architecture-walfly-20250724-120000/walfly-architecture.finalize-summary.json",
+    "browserCheckReceipt": "/Users/davidjones-gilardi/walfly/.archify/architecture-walfly-20250724-120000/walfly-architecture.browser-check.json"
+  },
+  "update": {
+    "status": "current",
+    "installedVersion": "3.1.0",
+    "availableVersion": "3.1.0",
+    "releaseNotes": null,
+    "checkedAt": "2026-10-15T20:56:17.113Z",
+    "source": "cache",
+    "noticeRequired": false,
+    "noticeText": null
+  },
+  "visualReview": "not-requested",
+  "durationMs": 2083,
+  "visualReviewRecommendation": {
+    "action": "inspect-route-readability",
+    "signals": {
+      "resolvedCrossovers": 2,
+      "routesOverSuggestedBends": 3,
+      "routesOverSuggestedStretch": 1
+    },
+    "reason": "Automated gates passed, but crossings or detours still need perceptual review before claiming visual quality.",
+    "affectedRoutes": {
+      "crossings": [
+        {
+          "left": {
+            "from": "api",
+            "to": "astra",
+            "label": "read / write docs + vectors",
+            "collectionIndex": 5,
+            "artifactIndex": 6
+          },
+          "right": {
+            "from": "api",
+            "to": "blob",
+            "label": "store audio",
+            "collectionIndex": 6,
+            "artifactIndex": 7
+          },
+          "point": [
+            723,
+            424
+          ],
+          "sharedNode": "api"
+        },
+        {
+          "left": {
+            "from": "api",
+            "to": "blob",
+            "label": "store audio",
+            "collectionIndex": 6,
+            "artifactIndex": 7
+          },
+          "right": {
+            "from": "api",
+            "to": "llm",
+            "label": "enrich + chat (SSE)",
+            "collectionIndex": 7,
+            "artifactIndex": 8
+          },
+          "point": [
+            723,
+            446
+          ],
+          "sharedNode": "api"
+        }
+      ],
+      "detours": [
+        {
+          "relationship": {
+            "from": "sidecar",
+            "to": "mobile",
+            "label": "partials + segments",
+            "collectionIndex": 3,
+            "artifactIndex": 4
+          },
+          "bends": 3,
+          "stretch": 1
+        },
+        {
+          "relationship": {
+            "from": "api",
+            "to": "astra",
+            "label": "read / write docs + vectors",
+            "collectionIndex": 5,
+            "artifactIndex": 6
+          },
+          "bends": 3,
+          "stretch": 1.245
+        },
+        {
+          "relationship": {
+            "from": "api",
+            "to": "blob",
+            "label": "store audio",
+            "collectionIndex": 6,
+            "artifactIndex": 7
+          },
+          "bends": 4,
+          "stretch": 2.379
+        }
+      ],
+      "truncated": false
+    },
+    "hints": [
+      "api → astra and api → blob cross next to api: move node astra or blob so the two reach api from different sides (for example one level with it, one directly above or below it).",
+      "api → blob and api → llm cross next to api: move node blob or llm so the two reach api from different sides (for example one level with it, one directly above or below it).",
+      "sidecar → mobile needs 3 bends: move node sidecar or mobile so they share a row or column with matching centers, or sit diagonally with a clear corner.",
+      "api → astra needs 3 bends: move node api or astra so they share a row or column with matching centers, or sit diagonally with a clear corner.",
+      "api → blob needs 4 bends: move node api or blob so they share a row or column with matching centers, or sit diagonally with a clear corner."
+    ],
+    "repair": "Trace these relationships at the desktop viewport. For Architecture, use references/architecture-layout-repair.md: reflow a blocked main path or tangled connected scene, and repair an isolated defect locally only when the surrounding composition is accepted. Preserve all semantic content and user-fixed geometry. Rerun finalize once after the edit."
+  },
+  "layoutReviewRecommendation": {
+    "action": "inspect-leading-space",
+    "evidence": {
+      "measured": true,
+      "emptyTopPx": 150,
+      "emptyTopRatio": 0.241,
+      "occupiedTop": 150,
+      "viewBoxTop": 0,
+      "canvasHeight": 622,
+      "typicalNodeHeight": 60,
+      "reviewSuggested": true
+    },
+    "reason": "Measured content, including routes and labels, leaves a large empty area above the diagram. This is a composition suggestion, not a failed gate.",
+    "repair": "Check whether that leading space is intentional. If not, reposition the connected scene nearer the canvas origin while retaining room for its actual boundaries, labels and return routes. Preserve all meaning and user-fixed geometry, then rerun finalize. No screenshot is required."
+  }
+}

@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "receiptId": "89457166-e48b-43fc-86cd-f257050a3ce1",
+  "status": "current",
+  "command": "deliver",
+  "type": "sequence",
+  "input": "/Users/davidjones-gilardi/walfly/.archify/sequence-recording-20250724-120000/candidate.json",
+  "output": "/Users/davidjones-gilardi/walfly/.archify/sequence-recording-20250724-120000/walfly-sequence.html",
+  "specification": {
+    "sha256": "747539b26be34691ea577b389c2bc348b190c56ca8a7a78635b668bfda7ffeea",
+    "bytes": 6260
+  },
+  "artifact": {
+    "sha256": "a3dfe9b6b6160f4a436e34d5076da547d9470d289820ce83857aa9bbba7da6c9",
+    "bytes": 826588
+  }
+}

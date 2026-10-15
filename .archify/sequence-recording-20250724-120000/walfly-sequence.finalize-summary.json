@@ -1,0 +1,47 @@
+{
+  "schemaVersion": 1,
+  "ok": true,
+  "command": "finalize",
+  "status": "pass",
+  "type": "sequence",
+  "quality": "showcase",
+  "specification": {
+    "path": "/Users/davidjones-gilardi/walfly/.archify/sequence-recording-20250724-120000/candidate.json",
+    "sha256": "747539b26be34691ea577b389c2bc348b190c56ca8a7a78635b668bfda7ffeea",
+    "bytes": 6260
+  },
+  "artifact": {
+    "path": "/Users/davidjones-gilardi/walfly/.archify/sequence-recording-20250724-120000/walfly-sequence.html",
+    "sha256": "a3dfe9b6b6160f4a436e34d5076da547d9470d289820ce83857aa9bbba7da6c9",
+    "bytes": 826588
+  },
+  "gates": {
+    "validate": "pass",
+    "deliver": "pass",
+    "check": "pass",
+    "browser-check": "pass"
+  },
+  "diagnostics": [],
+  "diagnosticSummary": {
+    "total": 0,
+    "shown": 0,
+    "truncated": false
+  },
+  "evidence": {
+    "receipt": "/Users/davidjones-gilardi/walfly/.archify/sequence-recording-20250724-120000/walfly-sequence.finalize.json",
+    "summaryReceipt": "/Users/davidjones-gilardi/walfly/.archify/sequence-recording-20250724-120000/walfly-sequence.finalize-summary.json",
+    "browserCheckReceipt": "/Users/davidjones-gilardi/walfly/.archify/sequence-recording-20250724-120000/walfly-sequence.browser-check.json"
+  },
+  "update": {
+    "status": "current",
+    "installedVersion": "3.1.0",
+    "availableVersion": "3.1.0",
+    "releaseNotes": null,
+    "checkedAt": "2026-10-15T20:56:17.113Z",
+    "source": "cache",
+    "noticeRequired": false,
+    "noticeText": null
+  },
+  "visualReview": "not-requested",
+  "durationMs": 1996
+}

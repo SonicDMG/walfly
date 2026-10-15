@@ -1,0 +1,40 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "walfly — System Architecture",
+    "subtitle": "Expo mobile · Next.js API · ASR sidecar · Astra DB vector store",
+    "output": ".archify/architecture-walfly-20250724-120000/walfly-architecture.html",
+    "quality_profile": "showcase"
+  },
+  "components": [
+    { "id": "user",     "type": "external",    "label": "User",          "sublabel": "iOS · Android · Web",        "pos": [40,  340], "size": [120, 60] },
+    { "id": "mobile",   "type": "frontend",    "label": "walfly App",    "sublabel": "Expo SDK 57 + expo-router",   "pos": [260, 340], "size": [160, 60] },
+    { "id": "opfs",     "type": "database",    "label": "Local Buffer",  "sublabel": "OPFS crash-safe WAV",         "pos": [260, 470], "size": [160, 56] },
+    { "id": "api",      "type": "backend",     "label": "Next.js API",   "sublabel": "Vercel Edge · App Router",    "pos": [560, 340], "size": [160, 60] },
+    { "id": "blob",     "type": "cloud",       "label": "Vercel Blob",   "sublabel": "Audio file storage",          "pos": [560, 470], "size": [160, 60] },
+    { "id": "sidecar",  "type": "backend",     "label": "ASR Sidecar",   "sublabel": "faster-whisper · Silero VAD", "pos": [560, 180], "size": [160, 60] },
+    { "id": "astra",    "type": "database",    "label": "Astra DB",      "sublabel": "Vector + Document store",     "pos": [820, 340], "size": [160, 60] },
+    { "id": "llm",      "type": "external",    "label": "LLM Proxy",     "sublabel": "OpenRouter · LiteLLM · Ollama","pos": [820, 470], "size": [160, 60] }
+  ],
+  "boundaries": [
+    { "kind": "region", "label": "Vercel (serverless)", "wraps": ["api", "blob"] },
+    { "kind": "region", "label": "Fly.io",              "wraps": ["sidecar"] }
+  ],
+  "connections": [
+    { "from": "user",    "to": "mobile",  "label": "tap record",        "variant": "emphasis" },
+    { "from": "mobile",  "to": "opfs",    "label": "every PCM frame",   "variant": "dashed",    "fromSide": "bottom", "toSide": "top" },
+    { "from": "mobile",  "to": "sidecar", "label": "WebSocket PCM stream","variant": "emphasis", "fromSide": "top",    "toSide": "left" },
+    { "from": "sidecar", "to": "mobile",  "label": "partials + segments","variant": "default",   "fromSide": "left",   "toSide": "top" },
+    { "from": "mobile",  "to": "api",     "label": "HTTPS (session · segments · process)", "variant": "default", "labelAt": [410, 268] },
+    { "from": "api",     "to": "astra",   "label": "read / write docs + vectors" },
+    { "from": "api",     "to": "blob",    "label": "store audio",       "variant": "dashed",    "fromSide": "top",    "toSide": "bottom" },
+    { "from": "api",     "to": "llm",     "label": "enrich + chat (SSE)","variant": "dashed",   "fromSide": "bottom", "toSide": "top" },
+    { "from": "astra",   "to": "api",     "label": "hybrid search results","variant": "default", "fromSide": "left",   "toSide": "right", "labelAt": [710, 290] }
+  ],
+  "cards": [
+    { "dot": "amber",   "title": "Live recording path",  "items": ["App streams 16 kHz PCM to sidecar over WebSocket", "Sidecar runs Silero VAD + faster-whisper; emits partials + finalized segments", "Every segment is checkpointed to Astra before ACK — crash loses ≤1 in-flight segment", "OPFS local buffer is written in parallel; delivered on relaunch if sidecar was unreachable"] },
+    { "dot": "emerald", "title": "Enrichment pipeline",  "items": ["POST /process advances one step at a time under an expiring Astra lease", "LLM proxy (any OpenAI-compatible model) extracts title, summary, takeaways, action items", "Vectorized title+summary blob auto-embedded by Astra's NVIDIA embedding service"] },
+    { "dot": "cyan",    "title": "Search + Chat (RAG)",  "items": ["Hybrid search: lexical + rerank (AWS us-east-2) or vector + RRF (all regions)", "Global chat: vector search injects top-N titles/summaries as context", "Per-recording chat: full transcript injected directly; responses stream via SSE"] }
+  ]
+}
