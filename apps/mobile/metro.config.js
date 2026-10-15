@@ -31,4 +31,22 @@ config.resolver.extraNodeModules = {
   ),
 };
 
+// @vercel/blob/client imports `undici` and relies on its package.json
+// `browser` map to swap in a shim. Metro mis-resolves that mapping for scoped
+// packages (looks in `@vercel/dist/` instead of `@vercel/blob/dist/`), so
+// point the web bundle at the shim directly.
+const upstreamResolveRequest = config.resolver.resolveRequest;
+config.resolver.resolveRequest = (context, moduleName, platform) => {
+  if (platform === 'web' && moduleName === 'undici') {
+    return {
+      type: 'sourceFile',
+      filePath: path.resolve(
+        path.dirname(require.resolve('@vercel/blob/client')),
+        'undici-browser.js',
+      ),
+    };
+  }
+  return (upstreamResolveRequest ?? context.resolveRequest)(context, moduleName, platform);
+};
+
 module.exports = config;
