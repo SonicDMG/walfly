@@ -12,7 +12,7 @@
  * is reported to the sidecar, which resamples server-side.
  */
 
-const WORKLET_URL = '/assets/audio/pcm-worklet.js';
+const WORKLET_URL = '/audio/pcm-worklet.js';
 
 export interface WebMicHandle {
   sampleRate: number;

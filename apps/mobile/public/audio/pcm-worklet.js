@@ -5,7 +5,7 @@
  * thread. It runs on the audio thread and posts 128-sample render quanta; the
  * main thread batches them into 100 ms frames (see lib/pcm.ts).
  *
- * Loaded by lib/webMic.ts via audioWorklet.addModule('/assets/audio/pcm-worklet.js').
+ * Loaded by lib/webMic.ts via audioWorklet.addModule('/audio/pcm-worklet.js').
  */
 
 class PcmTapProcessor extends AudioWorkletProcessor {

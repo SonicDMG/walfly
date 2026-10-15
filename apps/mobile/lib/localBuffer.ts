@@ -5,7 +5,7 @@
  * microphone runs, so nothing is lost when the sidecar, the network, or the app
  * itself goes away. Delivery is a separate concern (`lib/recoverClient.ts`).
  *
- *   Web    — OPFS through a dedicated worker (public/assets/audio/buffer-worker.js).
+ *   Web    — OPFS through a dedicated worker (public/audio/buffer-worker.js).
  *            The sync access handle is the only crash-safe append primitive:
  *            `createWritable()` discards its temp file when a tab dies open.
  *   Native — expo-file-system append handle; a 44-byte RIFF header is reserved
@@ -105,7 +105,7 @@ export async function listPendingBuffers(): Promise<string[]> {
 
 // ─── Web (OPFS in a worker) ──────────────────────────────────────────────────
 
-const WORKER_URL = '/assets/audio/buffer-worker.js';
+const WORKER_URL = '/audio/buffer-worker.js';
 
 interface WorkerMessage {
   t: string;
