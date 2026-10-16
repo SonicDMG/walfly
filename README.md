@@ -9,10 +9,6 @@
                          ╚══╝╚══╝ ╚═╝  ╚═╝╚══════╝╚═╝     ╚══════╝╚═╝
 ```
 
-### *The moments you were there for.*
-
-<br/>
-
 [![Expo SDK](https://img.shields.io/badge/Expo-SDK%2057-000020?logo=expo&logoColor=white)](https://expo.dev)
 [![Next.js](https://img.shields.io/badge/Next.js-16-black?logo=next.js)](https://nextjs.org)
 [![Astra DB](https://img.shields.io/badge/Astra%20DB-Vector-00C4F0?logo=datastax&logoColor=white)](https://astra.datastax.com)
@@ -30,6 +26,47 @@
 The app captures audio, transcribes it with speech recognition, enriches it with AI-generated summaries, key takeaways, and action items, then stores everything in a searchable, vector-indexed library you can chat with — all from a single button.
 
 > **The name.** A fly on the wall witnesses a moment without changing it. In walfly, *you* are the fly. The central metaphor is **amber** — the fossil resin that preserves creatures, including flies, for millions of years. A moment captured in walfly is a piece of time made tangible: permanent, warm, golden.
+
+<table>
+<tr>
+<td align="center" width="25%">
+
+**record**
+
+<img src="docs/screenshots/record.png" width="200" alt="record screen — amber mic button on midnight background"/>
+
+One button. Midnight background. Amber glow ring. Tap to begin.
+
+</td>
+<td align="center" width="25%">
+
+**moments**
+
+<img src="docs/screenshots/moments.png" width="200" alt="moments screen — scrollable list of AI-titled recordings"/>
+
+Your library. AI-titled cards, smart clusters, hybrid search.
+
+</td>
+<td align="center" width="25%">
+
+**detail**
+
+<img src="docs/screenshots/detail.png" width="200" alt="recording detail — summary, takeaways, action items, transcript"/>
+
+Summary, key takeaways, action items, collapsible transcript.
+
+</td>
+<td align="center" width="25%">
+
+**chat**
+
+<img src="docs/screenshots/chat.png" width="200" alt="chat screen — ask questions across all recordings"/>
+
+RAG-grounded streaming chat across all your moments.
+
+</td>
+</tr>
+</table>
 
 ---
 
