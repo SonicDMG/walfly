@@ -356,6 +356,9 @@ function MessageBubble({
 }
 
 // ── ProseContent — latest assistant message with interactive citations ─────
+//
+// Renders the prose ProsePart[] line-by-line so headings, horizontal rules,
+// and list items are handled in addition to plain paragraphs.
 
 interface ProseContentProps {
   prose: ProsePart[];
@@ -364,62 +367,96 @@ interface ProseContentProps {
 }
 
 function ProseContent({ prose, activeRef, onCitationClick }: ProseContentProps) {
-  // Group consecutive text parts into paragraphs, citations inline.
-  const nodes: React.ReactNode[] = [];
-  let paragraphTokens: React.ReactNode[] = [];
-  let key = 0;
+  // Re-assemble the prose parts into a single string so we can split on lines,
+  // but preserve citation markers as a special sentinel we can re-expand.
+  // We encode citations as \x00REF:<index>\x00 to survive line splitting.
 
-  const flushParagraph = () => {
-    if (paragraphTokens.length > 0) {
-      nodes.push(<p key={key++} style={styles.paragraph}>{paragraphTokens}</p>);
-      paragraphTokens = [];
-    }
-  };
-
+  let flat = '';
   for (const part of prose) {
     if (part.type === 'citation') {
-      const isActive = activeRef === part.refIndex;
-      paragraphTokens.push(
-        <span
-          key={key++}
-          style={{ ...styles.citationSpan, ...(isActive ? styles.citationActive : {}) }}
-          onClick={() => onCitationClick(part.refIndex)}
-          title={`View ${part.label} in sidebar`}
-        >
-          {part.label}
-        </span>,
-      );
+      flat += `\x00REF:${part.refIndex}:${encodeURIComponent(part.label)}:${encodeURIComponent(part.url)}\x00`;
     } else {
-      // Render inline markdown within the text segment
-      const inlineNodes = renderInline(part.value, key);
-      key += inlineNodes.length + 1;
-
-      // Split on double newlines → paragraph boundaries
-      const segments = part.value.split(/\n\n+/);
-      if (segments.length <= 1) {
-        paragraphTokens.push(...renderInline(part.value, key));
-        key += 50;
-      } else {
-        // First segment appends to current paragraph
-        paragraphTokens.push(...renderInline(segments[0], key));
-        key += 50;
-        flushParagraph();
-        // Middle segments are their own paragraphs
-        for (let i = 1; i < segments.length - 1; i++) {
-          nodes.push(
-            <p key={key++} style={styles.paragraph}>
-              {renderInline(segments[i], key)}
-            </p>,
-          );
-          key += 50;
-        }
-        // Last segment starts a new paragraph buffer
-        paragraphTokens.push(...renderInline(segments[segments.length - 1], key));
-        key += 50;
-      }
+      flat += part.value;
     }
   }
-  flushParagraph();
+
+  const nodes: React.ReactNode[] = [];
+  let key = 0;
+
+  // Split into logical blocks (blank-line separated).
+  const blocks = flat.split(/\n{2,}/);
+
+  for (const block of blocks) {
+    const lines = block.split('\n').filter((l) => l.trim() !== '');
+    if (lines.length === 0) continue;
+
+    const firstLine = lines[0].trim();
+
+    // Horizontal rule
+    if (/^---+$/.test(firstLine) && lines.length === 1) {
+      nodes.push(<hr key={key++} style={styles.hr} />);
+      continue;
+    }
+
+    // Heading
+    const headingMatch = firstLine.match(/^(#{1,3})\s+(.*)/);
+    if (headingMatch && lines.length === 1) {
+      const level = headingMatch[1].length;
+      const headingStyle = level === 1 ? styles.h1 : level === 2 ? styles.h2 : styles.h3;
+      nodes.push(
+        <div key={key++} style={headingStyle}>
+          {renderInlineWithCitations(headingMatch[2], key * 100, activeRef, onCitationClick)}
+        </div>,
+      );
+      key++;
+      continue;
+    }
+
+    // Ordered list: lines starting with "N." or "N)"
+    if (lines.every((l) => /^\s*\d+[.)]\s/.test(l))) {
+      nodes.push(
+        <ol key={key++} style={styles.ol}>
+          {lines.map((l, i) => {
+            const text = l.replace(/^\s*\d+[.)]\s+/, '');
+            return (
+              <li key={i} style={styles.li}>
+                {renderInlineWithCitations(text, key * 100 + i, activeRef, onCitationClick)}
+              </li>
+            );
+          })}
+        </ol>,
+      );
+      key++;
+      continue;
+    }
+
+    // Unordered list: lines starting with "- " or "* "
+    if (lines.every((l) => /^\s*[-*]\s/.test(l))) {
+      nodes.push(
+        <ul key={key++} style={styles.ul}>
+          {lines.map((l, i) => {
+            const text = l.replace(/^\s*[-*]\s+/, '');
+            return (
+              <li key={i} style={styles.li}>
+                {renderInlineWithCitations(text, key * 100 + i, activeRef, onCitationClick)}
+              </li>
+            );
+          })}
+        </ul>,
+      );
+      key++;
+      continue;
+    }
+
+    // Default: paragraph (join lines with spaces)
+    const paraText = lines.join(' ');
+    nodes.push(
+      <p key={key++} style={styles.paragraph}>
+        {renderInlineWithCitations(paraText, key * 100, activeRef, onCitationClick)}
+      </p>,
+    );
+    key++;
+  }
 
   return <div style={styles.content}>{nodes}</div>;
 }
@@ -427,17 +464,95 @@ function ProseContent({ prose, activeRef, onCitationClick }: ProseContentProps) 
 // ── PlainContent — older messages (no interactive citations needed) ─────────
 
 function PlainContent({ content }: { content: string }) {
-  // Strip code blocks and render prose only (same as ProseContent but static)
   const textOnly = content.replace(/```[\s\S]*?```/g, '').trim();
-  return (
-    <div style={styles.content}>
-      {textOnly.split(/\n\n+/).map((para, i) => (
-        <p key={i} style={styles.paragraph}>
-          {renderInline(para, i * 100)}
-        </p>
-      ))}
-    </div>
-  );
+  const nodes: React.ReactNode[] = [];
+  let key = 0;
+
+  const blocks = textOnly.split(/\n{2,}/);
+  for (const block of blocks) {
+    const lines = block.split('\n').filter((l) => l.trim() !== '');
+    if (lines.length === 0) continue;
+    const firstLine = lines[0].trim();
+
+    if (/^---+$/.test(firstLine) && lines.length === 1) {
+      nodes.push(<hr key={key++} style={styles.hr} />);
+      continue;
+    }
+    const headingMatch = firstLine.match(/^(#{1,3})\s+(.*)/);
+    if (headingMatch && lines.length === 1) {
+      const level = headingMatch[1].length;
+      const headingStyle = level === 1 ? styles.h1 : level === 2 ? styles.h2 : styles.h3;
+      nodes.push(<div key={key++} style={headingStyle}>{renderInline(headingMatch[2], key * 100)}</div>);
+      key++;
+      continue;
+    }
+    if (lines.every((l) => /^\s*\d+[.)]\s/.test(l))) {
+      nodes.push(
+        <ol key={key++} style={styles.ol}>
+          {lines.map((l, i) => <li key={i} style={styles.li}>{renderInline(l.replace(/^\s*\d+[.)]\s+/, ''), key * 100 + i)}</li>)}
+        </ol>,
+      );
+      key++;
+      continue;
+    }
+    if (lines.every((l) => /^\s*[-*]\s/.test(l))) {
+      nodes.push(
+        <ul key={key++} style={styles.ul}>
+          {lines.map((l, i) => <li key={i} style={styles.li}>{renderInline(l.replace(/^\s*[-*]\s+/, ''), key * 100 + i)}</li>)}
+        </ul>,
+      );
+      key++;
+      continue;
+    }
+    nodes.push(<p key={key++} style={styles.paragraph}>{renderInline(lines.join(' '), key * 100)}</p>);
+    key++;
+  }
+
+  return <div style={styles.content}>{nodes}</div>;
+}
+
+// ── renderInlineWithCitations ──────────────────────────────────────────────
+// Like renderInline but also expands \x00REF:...\x00 sentinels back into
+// clickable citation spans.
+
+function renderInlineWithCitations(
+  text: string,
+  baseKey: number,
+  activeRef: number | null,
+  onCitationClick: (idx: number) => void,
+): React.ReactNode[] {
+  const sentinelRe = /\x00REF:(\d+):([^\x00]*):([^\x00]*)\x00/g;
+  const parts = text.split(sentinelRe);
+  const nodes: React.ReactNode[] = [];
+
+  // split with a 3-group regex produces: [text, idx, label, url, text, idx, label, url, ...]
+  let i = 0;
+  let k = baseKey;
+  while (i < parts.length) {
+    const segment = parts[i];
+    if (segment) {
+      nodes.push(...renderInline(segment, k));
+      k += 100;
+    }
+    i++;
+    if (i + 2 < parts.length) {
+      const refIndex = parseInt(parts[i], 10);
+      const label = decodeURIComponent(parts[i + 1]);
+      i += 3; // skip idx, label, url
+      const isActive = activeRef === refIndex;
+      nodes.push(
+        <span
+          key={k++}
+          style={{ ...styles.citationSpan, ...(isActive ? styles.citationActive : {}) }}
+          onClick={() => onCitationClick(refIndex)}
+          title={`View ${label} in sidebar`}
+        >
+          {label}
+        </span>,
+      );
+    }
+  }
+  return nodes;
 }
 
 // ── Sidebar ────────────────────────────────────────────────────────────────
@@ -551,9 +666,13 @@ function RefCard({ ref_, isActive, onClick, cardRef }: RefCardProps) {
 // (or follows it within the same paragraph). If there is no adjacent citation,
 // the code block gets a generic label derived from the fence language.
 
-function parseMessage(content: string): ParsedMessage {
+function parseMessage(rawContent: string): ParsedMessage {
   const refs: RefBlock[] = [];
   const prose: ProsePart[] = [];
+
+  // If the LLM wrapped its entire response in a single outer fence, unwrap it.
+  const outerFenceMatch = rawContent.match(/^```[a-zA-Z0-9_+-]*\n([\s\S]*?)\n?```\s*$/);
+  const content = outerFenceMatch ? outerFenceMatch[1] : rawContent;
 
   // Regex that matches either a citation link or a fenced code block.
   const tokenRe = /(\[([^\]]+)\]\((https?:\/\/[^)]+)\))|(`{3}([a-zA-Z0-9_+-]*)\n?([\s\S]*?)`{3})/g;
@@ -628,16 +747,17 @@ function parseMessage(content: string): ParsedMessage {
 }
 
 // ── Inline renderer ────────────────────────────────────────────────────────
-// Handles **bold**, `inline code`, and [label](url) as plain links.
-// Citations are handled upstream by ProseContent, so links here are
-// non-GitHub links only (the parser already extracted GitHub refs).
+// Handles **bold**, *italic*, `inline code`, and [label](url) plain links.
 
 function renderInline(text: string, baseKey: number): React.ReactNode[] {
-  const tokens = text.split(/(\*\*[^*]+\*\*|`[^`]+`|\[[^\]]+\]\([^)]+\))/g);
+  const tokens = text.split(/(\*\*[^*]+\*\*|\*[^*]+\*|`[^`]+`|\[[^\]]+\]\([^)]+\))/g);
   return tokens.map((token, i) => {
     const k = baseKey + i;
     if (token.startsWith('**') && token.endsWith('**')) {
       return <strong key={k}>{token.slice(2, -2)}</strong>;
+    }
+    if (token.startsWith('*') && token.endsWith('*') && !token.startsWith('**')) {
+      return <em key={k}>{token.slice(1, -1)}</em>;
     }
     if (token.startsWith('`') && token.endsWith('`')) {
       return <code key={k} style={styles.inlineCode}>{token.slice(1, -1)}</code>;
@@ -743,8 +863,17 @@ const styles = {
     letterSpacing: '0.08em',
   },
   pending: { color: c.mist, fontStyle: 'italic' as const },
-  content: { display: 'flex', flexDirection: 'column' as const, gap: '6px' },
+  content: { display: 'flex', flexDirection: 'column' as const, gap: '8px' },
   paragraph: { margin: 0, color: c.cream },
+
+  // Markdown block elements
+  h1: { fontFamily: 'Georgia, serif', fontSize: '18px', fontWeight: 700, color: c.cream, margin: '4px 0 2px', letterSpacing: '0.3px' },
+  h2: { fontFamily: 'Georgia, serif', fontSize: '16px', fontWeight: 700, color: c.cream, margin: '4px 0 2px' },
+  h3: { fontFamily: 'inherit', fontSize: '14px', fontWeight: 600, color: c.amber, margin: '4px 0 2px' },
+  hr: { border: 'none', borderTop: `1px solid ${c.border}`, margin: '8px 0' },
+  ul: { margin: '0', paddingLeft: '20px', color: c.cream },
+  ol: { margin: '0', paddingLeft: '20px', color: c.cream },
+  li: { marginBottom: '3px' },
 
   // Citation pill spans — amber on dark
   citationSpan: {
