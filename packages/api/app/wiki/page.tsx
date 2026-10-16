@@ -119,18 +119,25 @@ export default function WikiPage() {
     window.addEventListener('mouseup', onMouseUp);
   }, [sidebarWidth]);
 
-  // Inject highlight.js + GitHub Dark theme from CDN once on mount.
+  // Inject highlight.js + tokyo-night-dark theme from CDN once on mount.
   useEffect(() => {
-    if (document.getElementById('hljs-css')) return;
-    const link = document.createElement('link');
-    link.id = 'hljs-css';
-    link.rel = 'stylesheet';
+    // Always set the correct href in case a previous session loaded a different theme.
+    let link = document.getElementById('hljs-css') as HTMLLinkElement | null;
+    if (!link) {
+      link = document.createElement('link');
+      link.id = 'hljs-css';
+      link.rel = 'stylesheet';
+      document.head.appendChild(link);
+    }
     link.href = 'https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.10.0/styles/tokyo-night-dark.min.css';
-    document.head.appendChild(link);
-    const script = document.createElement('script');
-    script.src = 'https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.10.0/highlight.min.js';
-    script.onload = () => window.hljs?.configure({ ignoreUnescapedHTML: true });
-    document.head.appendChild(script);
+
+    if (!document.getElementById('hljs-script')) {
+      const script = document.createElement('script');
+      script.id = 'hljs-script';
+      script.src = 'https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.10.0/highlight.min.js';
+      script.onload = () => window.hljs?.configure({ ignoreUnescapedHTML: true });
+      document.head.appendChild(script);
+    }
   }, []);
 
   // Auto-scroll chat to bottom on new messages.
@@ -982,7 +989,10 @@ const styles = {
     overflowX: 'auto' as const,
     maxHeight: '320px',
     overflowY: 'auto' as const,
-    background: c.charcoal,
+    // Keep our dark surface — hljs injects a stylesheet background on <pre>
+    // but inline style wins over class-based rules.
+    background: '#1E1E22',
+    borderRadius: '0 0 8px 8px', // matches refCard bottom radius
   },
 
   // ── Footer / input ──
