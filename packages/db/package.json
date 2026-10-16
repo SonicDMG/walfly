@@ -6,8 +6,8 @@
   "types": "./src/index.ts",
   "scripts": {
     "build": "tsc --noEmit",
-    "seed": "tsx src/seed-schema.ts",
-    "seed:v2": "tsx src/seed-schema-v2.ts"
+    "seed": "tsx src/seed-schema-v2.ts",
+    "seed:v1": "tsx src/seed-schema.ts"
   },
   "dependencies": {
     "@datastax/astra-db-ts": "^2.3.0",
