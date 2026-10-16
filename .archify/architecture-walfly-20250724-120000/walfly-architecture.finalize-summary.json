@@ -1,30 +1,49 @@
 {
   "schemaVersion": 1,
-  "ok": true,
+  "ok": false,
   "command": "finalize",
-  "status": "pass",
+  "status": "fail",
   "type": "architecture",
   "quality": "showcase",
   "specification": {
     "path": "/Users/davidjones-gilardi/walfly/.archify/architecture-walfly-20250724-120000/candidate.json",
-    "sha256": "a5fa270cb3dde13529a2c48cbe6d5a8b341b357d65933038ecae39ee8c3b4c69",
-    "bytes": 4023
+    "sha256": "d0acaa575afaeea234f911cf34d91ebc5f34be0d9bdb6d99e7cfc25ff11a861b",
+    "bytes": 5134
   },
   "artifact": {
     "path": "/Users/davidjones-gilardi/walfly/.archify/architecture-walfly-20250724-120000/walfly-architecture.html",
-    "sha256": "e0923da2b86e07005ca5d6ba3243d0c6c1cf1862cb307c237a2fd12613d3bab3",
-    "bytes": 823808
+    "sha256": "6d14323b55d8ca2db87daf16ff2d1bdbbdfb4f674dfa6a1435551d21650556f6",
+    "bytes": 823531
   },
   "gates": {
     "validate": "pass",
     "deliver": "pass",
     "check": "pass",
-    "browser-check": "pass"
+    "browser-check": "fail"
   },
-  "diagnostics": [],
+  "failedStage": "browser-check",
+  "diagnostics": [
+    {
+      "code": "viewer/evidence-path-conflict",
+      "severity": "error",
+      "message": "browser-check will not replace the existing unowned evidence path \"/Users/davidjones-gilardi/walfly/.archify/architecture-walfly-20250724-120000/walfly-architecture.browser-check.json\".",
+      "subject": {
+        "artifact": "/Users/davidjones-gilardi/walfly/.archify/architecture-walfly-20250724-120000/walfly-architecture.html",
+        "evidencePath": "/Users/davidjones-gilardi/walfly/.archify/architecture-walfly-20250724-120000/walfly-architecture.browser-check.json"
+      },
+      "evidence": {
+        "reason": {
+          "code": "ownership-artifact-mismatch"
+        }
+      },
+      "supportedFixes": [
+        "move the conflicting file aside, or choose a separate --out-dir, then rerun browser-check"
+      ]
+    }
+  ],
   "diagnosticSummary": {
-    "total": 0,
-    "shown": 0,
+    "total": 1,
+    "shown": 1,
     "truncated": false
   },
   "evidence": {
@@ -43,119 +62,5 @@
     "noticeText": null
   },
   "visualReview": "not-requested",
-  "durationMs": 2083,
-  "visualReviewRecommendation": {
-    "action": "inspect-route-readability",
-    "signals": {
-      "resolvedCrossovers": 2,
-      "routesOverSuggestedBends": 3,
-      "routesOverSuggestedStretch": 1
-    },
-    "reason": "Automated gates passed, but crossings or detours still need perceptual review before claiming visual quality.",
-    "affectedRoutes": {
-      "crossings": [
-        {
-          "left": {
-            "from": "api",
-            "to": "astra",
-            "label": "read / write docs + vectors",
-            "collectionIndex": 5,
-            "artifactIndex": 6
-          },
-          "right": {
-            "from": "api",
-            "to": "blob",
-            "label": "store audio",
-            "collectionIndex": 6,
-            "artifactIndex": 7
-          },
-          "point": [
-            723,
-            424
-          ],
-          "sharedNode": "api"
-        },
-        {
-          "left": {
-            "from": "api",
-            "to": "blob",
-            "label": "store audio",
-            "collectionIndex": 6,
-            "artifactIndex": 7
-          },
-          "right": {
-            "from": "api",
-            "to": "llm",
-            "label": "enrich + chat (SSE)",
-            "collectionIndex": 7,
-            "artifactIndex": 8
-          },
-          "point": [
-            723,
-            446
-          ],
-          "sharedNode": "api"
-        }
-      ],
-      "detours": [
-        {
-          "relationship": {
-            "from": "sidecar",
-            "to": "mobile",
-            "label": "partials + segments",
-            "collectionIndex": 3,
-            "artifactIndex": 4
-          },
-          "bends": 3,
-          "stretch": 1
-        },
-        {
-          "relationship": {
-            "from": "api",
-            "to": "astra",
-            "label": "read / write docs + vectors",
-            "collectionIndex": 5,
-            "artifactIndex": 6
-          },
-          "bends": 3,
-          "stretch": 1.245
-        },
-        {
-          "relationship": {
-            "from": "api",
-            "to": "blob",
-            "label": "store audio",
-            "collectionIndex": 6,
-            "artifactIndex": 7
-          },
-          "bends": 4,
-          "stretch": 2.379
-        }
-      ],
-      "truncated": false
-    },
-    "hints": [
-      "api → astra and api → blob cross next to api: move node astra or blob so the two reach api from different sides (for example one level with it, one directly above or below it).",
-      "api → blob and api → llm cross next to api: move node blob or llm so the two reach api from different sides (for example one level with it, one directly above or below it).",
-      "sidecar → mobile needs 3 bends: move node sidecar or mobile so they share a row or column with matching centers, or sit diagonally with a clear corner.",
-      "api → astra needs 3 bends: move node api or astra so they share a row or column with matching centers, or sit diagonally with a clear corner.",
-      "api → blob needs 4 bends: move node api or blob so they share a row or column with matching centers, or sit diagonally with a clear corner."
-    ],
-    "repair": "Trace these relationships at the desktop viewport. For Architecture, use references/architecture-layout-repair.md: reflow a blocked main path or tangled connected scene, and repair an isolated defect locally only when the surrounding composition is accepted. Preserve all semantic content and user-fixed geometry. Rerun finalize once after the edit."
-  },
-  "layoutReviewRecommendation": {
-    "action": "inspect-leading-space",
-    "evidence": {
-      "measured": true,
-      "emptyTopPx": 150,
-      "emptyTopRatio": 0.241,
-      "occupiedTop": 150,
-      "viewBoxTop": 0,
-      "canvasHeight": 622,
-      "typicalNodeHeight": 60,
-      "reviewSuggested": true
-    },
-    "reason": "Measured content, including routes and labels, leaves a large empty area above the diagram. This is a composition suggestion, not a failed gate.",
-    "repair": "Check whether that leading space is intentional. If not, reposition the connected scene nearer the canvas origin while retaining room for its actual boundaries, labels and return routes. Preserve all meaning and user-fixed geometry, then rerun finalize. No screenshot is required."
-  }
+  "durationMs": 893
 }

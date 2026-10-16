@@ -9,57 +9,311 @@
     "animation": "trace"
   },
   "participants": [
-    { "id": "app",     "type": "frontend",  "label": "Expo App",     "sublabel": "web · iOS · Android" },
-    { "id": "opfs",    "type": "database",  "label": "Local Buffer", "sublabel": "OPFS / file crash-safe" },
-    { "id": "api",     "type": "backend",   "label": "Next.js API",  "sublabel": "Vercel serverless" },
-    { "id": "sidecar", "type": "backend",   "label": "ASR Sidecar",  "sublabel": "faster-whisper · Fly.io" },
-    { "id": "astra",   "type": "database",  "label": "Astra DB",     "sublabel": "vector + document" },
-    { "id": "llm",     "type": "external",  "label": "LLM Proxy",    "sublabel": "OpenRouter / LiteLLM" }
+    {
+      "id": "app",
+      "type": "frontend",
+      "label": "Expo App",
+      "sublabel": "web · iOS · Android"
+    },
+    {
+      "id": "opfs",
+      "type": "database",
+      "label": "Local Buffer",
+      "sublabel": "OPFS / file crash-safe"
+    },
+    {
+      "id": "api",
+      "type": "backend",
+      "label": "Next.js API",
+      "sublabel": "local · Vercel-ready"
+    },
+    {
+      "id": "sidecar",
+      "type": "backend",
+      "label": "ASR Sidecar",
+      "sublabel": "faster-whisper · local"
+    },
+    {
+      "id": "astra",
+      "type": "database",
+      "label": "Astra DB",
+      "sublabel": "vector + document"
+    },
+    {
+      "id": "llm",
+      "type": "external",
+      "label": "LLM Proxy",
+      "sublabel": "OpenRouter / LiteLLM"
+    }
   ],
   "segments": [
-    { "from": 150, "to": 340,  "label": "Setup" },
-    { "from": 350, "to": 595,  "label": "Streaming" },
-    { "from": 647, "to": 772,  "label": "Finalize" },
-    { "from": 774, "to": 1030, "label": "Enrich" }
+    {
+      "from": 150,
+      "to": 340,
+      "label": "Setup"
+    },
+    {
+      "from": 350,
+      "to": 595,
+      "label": "Streaming"
+    },
+    {
+      "from": 647,
+      "to": 772,
+      "label": "Finalize"
+    },
+    {
+      "from": 774,
+      "to": 1030,
+      "label": "Enrich"
+    }
   ],
   "messages": [
-    { "from": "app",     "to": "api",     "y": 160,  "label": "POST /recordings/session",            "variant": "emphasis",  "note": "Creates a live-mode doc in Astra with status: live" },
-    { "from": "api",     "to": "astra",   "y": 210,  "label": "insert doc (status: live)",            "variant": "default" },
-    { "from": "api",     "to": "app",     "y": 238,  "label": "{ id }",                               "variant": "return" },
-    { "from": "app",     "to": "api",     "y": 266,  "label": "POST /recordings/{id}/ws-ticket",      "variant": "security",  "note": "Mints a single-use HMAC ticket (TTL 120 s) bound to the recording id" },
-    { "from": "api",     "to": "app",     "y": 332,  "label": "{ ticket, sidecarWsUrl }",             "variant": "return" },
-    { "from": "app",     "to": "sidecar", "y": 370,  "label": "WebSocket upgrade (walfly.v1, ticket.…)", "variant": "emphasis", "note": "Subprotocol carries the ticket — browsers cannot set custom WS headers" },
-    { "from": "sidecar", "to": "app",     "y": 430,  "label": "ready",                                "variant": "return" },
-    { "from": "app",     "to": "sidecar", "y": 466,  "label": "binary PCM frames (100 ms / 3.2 KB)",  "variant": "emphasis" },
-    { "from": "app",     "to": "opfs",    "y": 494,  "label": "write every frame (crash-safe)",       "variant": "dashed",   "note": "Parallel write to OPFS/file; delivered on relaunch if sidecar was unreachable" },
-    { "from": "sidecar", "to": "app",     "y": 571,  "label": "partial transcript (live captions)",   "variant": "return" },
-    { "from": "sidecar", "to": "app",     "y": 599,  "label": "segment { seq, startMs, endMs, text }", "variant": "return" },
-    { "from": "app",     "to": "api",     "y": 643,  "label": "POST /recordings/{id}/segments",       "variant": "emphasis",  "note": "Idempotent upsert; segment is durable in Astra before ACK is sent to sidecar" },
-    { "from": "api",     "to": "astra",   "y": 683,  "label": "upsert segment",                       "variant": "default" },
-    { "from": "app",     "to": "sidecar", "y": 719,  "label": "ack { seq }",                          "variant": "security",  "note": "Sidecar trims replay ring only after Astra confirms durability" },
-    { "from": "app",     "to": "api",     "y": 785,  "label": "POST /recordings/{id}/finalize",       "variant": "emphasis",  "note": "Waits for sidecar's final flush; local buffer delivery happens here" },
-    { "from": "api",     "to": "astra",   "y": 825,  "label": "status: uploaded",                     "variant": "default" },
-    { "from": "app",     "to": "api",     "y": 863,  "label": "POST /recordings/{id}/process (enrich)", "variant": "default" },
-    { "from": "api",     "to": "llm",     "y": 901,  "label": "chat completion (title, summary, takeaways)", "variant": "emphasis", "note": "Stateless; client holds history. SSE streams tokens back." },
-    { "from": "llm",     "to": "api",     "y": 961,  "label": "structured JSON enrichment",           "variant": "return" },
-    { "from": "api",     "to": "astra",   "y": 989,  "label": "patch doc + $vectorize (status: ready)", "variant": "emphasis" },
-    { "from": "api",     "to": "app",     "y": 1017, "label": "{ status: ready }",                    "variant": "return" }
+    {
+      "from": "app",
+      "to": "api",
+      "y": 160,
+      "label": "POST /recordings/session",
+      "variant": "emphasis",
+      "note": "Creates a live-mode doc in Astra with status: live"
+    },
+    {
+      "from": "api",
+      "to": "astra",
+      "y": 210,
+      "label": "insert doc (status: live)",
+      "variant": "default"
+    },
+    {
+      "from": "api",
+      "to": "app",
+      "y": 238,
+      "label": "{ id }",
+      "variant": "return"
+    },
+    {
+      "from": "app",
+      "to": "api",
+      "y": 266,
+      "label": "POST /recordings/{id}/ws-ticket",
+      "variant": "security",
+      "note": "Mints a single-use HMAC ticket (TTL 120 s) bound to the recording id"
+    },
+    {
+      "from": "api",
+      "to": "app",
+      "y": 332,
+      "label": "{ ticket, sidecarWsUrl }",
+      "variant": "return"
+    },
+    {
+      "from": "app",
+      "to": "sidecar",
+      "y": 370,
+      "label": "WebSocket upgrade (walfly.v1, ticket.…)",
+      "variant": "emphasis",
+      "note": "Subprotocol carries the ticket — browsers cannot set custom WS headers"
+    },
+    {
+      "from": "sidecar",
+      "to": "app",
+      "y": 430,
+      "label": "ready",
+      "variant": "return"
+    },
+    {
+      "from": "app",
+      "to": "sidecar",
+      "y": 466,
+      "label": "binary PCM frames (100 ms / 3.2 KB)",
+      "variant": "emphasis"
+    },
+    {
+      "from": "app",
+      "to": "opfs",
+      "y": 494,
+      "label": "write every frame (crash-safe)",
+      "variant": "dashed",
+      "note": "Parallel write to OPFS/file; delivered on relaunch if sidecar was unreachable"
+    },
+    {
+      "from": "sidecar",
+      "to": "app",
+      "y": 571,
+      "label": "partial transcript (live captions)",
+      "variant": "return"
+    },
+    {
+      "from": "sidecar",
+      "to": "app",
+      "y": 599,
+      "label": "segment { seq, startMs, endMs, text }",
+      "variant": "return"
+    },
+    {
+      "from": "app",
+      "to": "api",
+      "y": 643,
+      "label": "POST /recordings/{id}/segments",
+      "variant": "emphasis",
+      "note": "Idempotent upsert; segment is durable in Astra before ACK is sent to sidecar"
+    },
+    {
+      "from": "api",
+      "to": "astra",
+      "y": 683,
+      "label": "upsert segment",
+      "variant": "default"
+    },
+    {
+      "from": "app",
+      "to": "sidecar",
+      "y": 719,
+      "label": "ack { seq }",
+      "variant": "security",
+      "note": "Sidecar trims replay ring only after Astra confirms durability"
+    },
+    {
+      "from": "app",
+      "to": "api",
+      "y": 785,
+      "label": "POST /recordings/{id}/finalize",
+      "variant": "emphasis",
+      "note": "Waits for sidecar's final flush; local buffer delivery happens here"
+    },
+    {
+      "from": "api",
+      "to": "astra",
+      "y": 825,
+      "label": "status: uploaded",
+      "variant": "default"
+    },
+    {
+      "from": "app",
+      "to": "api",
+      "y": 863,
+      "label": "POST /recordings/{id}/process (enrich)",
+      "variant": "default"
+    },
+    {
+      "from": "api",
+      "to": "llm",
+      "y": 901,
+      "label": "chat completion (title, summary, takeaways)",
+      "variant": "emphasis",
+      "note": "Stateless; client holds history. SSE streams tokens back."
+    },
+    {
+      "from": "llm",
+      "to": "api",
+      "y": 961,
+      "label": "structured JSON enrichment",
+      "variant": "return"
+    },
+    {
+      "from": "api",
+      "to": "astra",
+      "y": 989,
+      "label": "patch doc + $vectorize (status: ready)",
+      "variant": "emphasis"
+    },
+    {
+      "from": "api",
+      "to": "app",
+      "y": 1017,
+      "label": "{ status: ready }",
+      "variant": "return"
+    }
   ],
   "activations": [
-    { "participant": "app",     "from": 155, "to": 1025, "type": "frontend" },
-    { "participant": "api",     "from": 160, "to":  330, "type": "backend" },
-    { "participant": "api",     "from": 647, "to":  700, "type": "backend" },
-    { "participant": "api",     "from": 779, "to": 1023, "type": "backend" },
-    { "participant": "sidecar", "from": 364, "to":  590, "type": "backend" },
-    { "participant": "astra",   "from": 205, "to":  243, "type": "database" },
-    { "participant": "astra",   "from": 678, "to":  695, "type": "database" },
-    { "participant": "astra",   "from": 820, "to":  838, "type": "database" },
-    { "participant": "astra",   "from": 984, "to": 1002, "type": "database" },
-    { "participant": "llm",     "from": 896, "to":  967, "type": "external" }
+    {
+      "participant": "app",
+      "from": 155,
+      "to": 1025,
+      "type": "frontend"
+    },
+    {
+      "participant": "api",
+      "from": 160,
+      "to": 330,
+      "type": "backend"
+    },
+    {
+      "participant": "api",
+      "from": 647,
+      "to": 700,
+      "type": "backend"
+    },
+    {
+      "participant": "api",
+      "from": 779,
+      "to": 1023,
+      "type": "backend"
+    },
+    {
+      "participant": "sidecar",
+      "from": 364,
+      "to": 590,
+      "type": "backend"
+    },
+    {
+      "participant": "astra",
+      "from": 205,
+      "to": 243,
+      "type": "database"
+    },
+    {
+      "participant": "astra",
+      "from": 678,
+      "to": 695,
+      "type": "database"
+    },
+    {
+      "participant": "astra",
+      "from": 820,
+      "to": 838,
+      "type": "database"
+    },
+    {
+      "participant": "astra",
+      "from": 984,
+      "to": 1002,
+      "type": "database"
+    },
+    {
+      "participant": "llm",
+      "from": 896,
+      "to": 967,
+      "type": "external"
+    }
   ],
   "cards": [
-    { "dot": "amber",   "title": "Crash safety",        "items": ["Every PCM frame is written to a local OPFS/file buffer before streaming", "Segments are durable in Astra before sidecar ACK trims the replay ring", "If the app dies mid-session, the full recording is delivered from the local buffer on next launch"] },
-    { "dot": "emerald", "title": "Enrichment",          "items": ["POST /process advances one pipeline step per call under an expiring Astra lease", "No background jobs — client drives all progress ticks", "Vectorized title+summary blob auto-embedded by Astra for hybrid search"] },
-    { "dot": "cyan",    "title": "Security",            "items": ["Single-use HMAC ticket (TTL 120 s) bound to recording id", "Ticket is carried in Sec-WebSocket-Protocol — browsers cannot set custom WS headers", "Sidecar holds no database credentials; all persistence goes through the API"] }
+    {
+      "dot": "amber",
+      "title": "Crash safety",
+      "items": [
+        "Every PCM frame is written to a local OPFS/file buffer before streaming",
+        "Segments are durable in Astra before sidecar ACK trims the replay ring",
+        "If the app dies mid-session, the full recording is delivered from the local buffer on next launch"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "Enrichment",
+      "items": [
+        "POST /process advances one pipeline step per call under an expiring Astra lease",
+        "No background jobs — client drives all progress ticks",
+        "Vectorized title+summary blob auto-embedded by Astra for hybrid search"
+      ]
+    },
+    {
+      "dot": "cyan",
+      "title": "Security",
+      "items": [
+        "Single-use HMAC ticket (TTL 120 s) bound to recording id",
+        "Ticket is carried in Sec-WebSocket-Protocol — browsers cannot set custom WS headers",
+        "Sidecar holds no database credentials; all persistence goes through the API"
+      ]
+    }
   ]
 }

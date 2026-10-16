@@ -1,17 +1,17 @@
 {
   "schemaVersion": 1,
-  "receiptId": "2cc2aa26-1b9a-4f05-ba8b-a26cdbedb989",
+  "receiptId": "31a77c40-a152-4826-b513-42abc6acfcda",
   "status": "current",
   "command": "deliver",
   "type": "architecture",
   "input": "/Users/davidjones-gilardi/walfly/.archify/architecture-walfly-20250724-120000/candidate.json",
   "output": "/Users/davidjones-gilardi/walfly/.archify/architecture-walfly-20250724-120000/walfly-architecture.html",
   "specification": {
-    "sha256": "a5fa270cb3dde13529a2c48cbe6d5a8b341b357d65933038ecae39ee8c3b4c69",
-    "bytes": 4023
+    "sha256": "737edb7efa39c557ad8f968bcc8d3bebf950335727f60170f440f1a146ca3fdc",
+    "bytes": 4946
   },
   "artifact": {
-    "sha256": "e0923da2b86e07005ca5d6ba3243d0c6c1cf1862cb307c237a2fd12613d3bab3",
-    "bytes": 823808
+    "sha256": "4a87ce3f0409e2b953625772173d980ffb538d97d4bff043bfd1776d9e9042e9",
+    "bytes": 820635
   }
 }

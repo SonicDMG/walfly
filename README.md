@@ -12,7 +12,6 @@
 [![Expo SDK](https://img.shields.io/badge/Expo-SDK%2057-000020?logo=expo&logoColor=white)](https://expo.dev)
 [![Next.js](https://img.shields.io/badge/Next.js-16-black?logo=next.js)](https://nextjs.org)
 [![Astra DB](https://img.shields.io/badge/Astra%20DB-Vector-00C4F0?logo=datastax&logoColor=white)](https://astra.datastax.com)
-[![Vercel](https://img.shields.io/badge/Deployed-Vercel-000000?logo=vercel)](https://vercel.com)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org)
 
 </div>
@@ -94,6 +93,8 @@ RAG-grounded streaming chat across all your moments.
 
 Every finalized segment is checkpointed to [Astra DB](https://astra.datastax.com) before being acknowledged to the sidecar. If the connection drops, the sidecar replays unacknowledged segments. If the app dies, a local OPFS buffer delivers the full recording on the next launch. **Nothing you say is lost.**
 
+> **Deployment status:** walfly currently runs locally (`npm run dev`). The API is written to be Vercel-compatible and the sidecar ships a `fly.toml`, but neither has been deployed yet.
+
 ---
 
 ## Stack
@@ -101,13 +102,13 @@ Every finalized segment is checkpointed to [Astra DB](https://astra.datastax.com
 | Layer | Technology | Why |
 |---|---|---|
 | **Frontend** | [Expo](https://expo.dev) SDK 57 + [expo-router](https://expo.github.io/router) | One codebase for web, iOS, Android |
-| **API** | [Next.js](https://nextjs.org) 16 App Router on [Vercel](https://vercel.com) | Edge-compatible, serverless, zero-ops |
-| **ASR** | [faster-whisper](https://github.com/SYSTRAN/faster-whisper) + [Silero VAD](https://github.com/snakers4/silero-vad) on [Fly.io](https://fly.io) | Real-time streaming transcription; LocalAgreement-2 for stable partials |
+| **API** | [Next.js](https://nextjs.org) 16 App Router (runs locally; Vercel-compatible, not yet deployed) | Serverless-friendly route handlers |
+| **ASR** | [faster-whisper](https://github.com/SYSTRAN/faster-whisper) + [Silero VAD](https://github.com/snakers4/silero-vad) sidecar (runs locally; `fly.toml` included, not yet deployed) | Real-time streaming transcription; LocalAgreement-2 for stable partials |
 | **Transcription (file)** | [Docling](https://github.com/docling-project/docling) SaaS | Timestamped markdown output; no local Python needed |
 | **Database** | [Astra DB](https://astra.datastax.com) (DataStax) | Vector store + document DB; built-in NVIDIA embeddings |
 | **Vector search** | Hybrid lexical + rerank (AWS `us-east-2`) / vector + RRF (all regions) | Semantic + keyword search across all recordings |
 | **LLM** | OpenAI-compatible proxy ([OpenRouter](https://openrouter.ai) / [LiteLLM](https://github.com/BerriAI/litellm) / [Ollama](https://ollama.com)) | Swap any model without code changes via env vars |
-| **Audio storage** | [Vercel Blob](https://vercel.com/docs/storage/vercel-blob) (prod) / local `.data/audio/` (dev) | Zero-config local fallback |
+| **Audio storage** | Local `.data/audio/` (default) / [Vercel Blob](https://vercel.com/docs/storage/vercel-blob) when `BLOB_READ_WRITE_TOKEN` is set | Zero-config local fallback; Blob is opt-in |
 | **Language** | [TypeScript](https://www.typescriptlang.org) end-to-end | Shared types between API and mobile |
 
 ---
@@ -233,10 +234,10 @@ walfly/
 │       ├── app/recording/   # recording detail screen
 │       └── lib/             # theme tokens, types, hooks
 ├── packages/
-│   ├── api/                 # Next.js API (Vercel)
+│   ├── api/                 # Next.js API
 │   │   ├── app/api/         # route handlers
 │   │   ├── lib/             # transcribe · enrich · llm · store
-│   │   └── sidecar/         # Python ASR sidecar (Fly.io)
+│   │   └── sidecar/         # Python ASR sidecar (fly.toml included)
 │   └── db/                  # Astra DB client, schema, types
 └── research_notes/          # architecture decisions and research
 ```
@@ -258,6 +259,7 @@ walfly/
 - [x] Streaming ASR sidecar ([faster-whisper](https://github.com/SYSTRAN/faster-whisper) + [Silero VAD](https://github.com/snakers4/silero-vad))
 - [x] Live captions via WebSocket
 - [x] Crash-safe local buffer with recovery upload
+- [ ] Deploy API to Vercel and sidecar to Fly.io
 - [ ] Live rolling enrichment (phase 2)
 - [ ] Multi-user auth
 - [ ] Apple Watch companion (ST-9)
