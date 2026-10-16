@@ -14,6 +14,16 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 
+// Extend Window to carry the highlight.js global injected via CDN script.
+declare global {
+  interface Window {
+    hljs?: {
+      highlightElement: (el: HTMLElement) => void;
+      configure: (opts: Record<string, unknown>) => void;
+    };
+  }
+}
+
 const REPO_URL = 'https://github.com/SonicDMG/walfly';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -40,6 +50,22 @@ export default function WikiPage() {
   const [loading, setLoading] = useState(false);
   const bottomRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+
+  // Inject highlight.js + GitHub Dark theme from CDN once on mount.
+  useEffect(() => {
+    if (document.getElementById('hljs-css')) return;
+
+    const link = document.createElement('link');
+    link.id = 'hljs-css';
+    link.rel = 'stylesheet';
+    link.href = 'https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.10.0/styles/github-dark.min.css';
+    document.head.appendChild(link);
+
+    const script = document.createElement('script');
+    script.src = 'https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.10.0/highlight.min.js';
+    script.onload = () => window.hljs?.configure({ ignoreUnescapedHTML: true });
+    document.head.appendChild(script);
+  }, []);
 
   // Auto-scroll to bottom when messages change
   useEffect(() => {
@@ -221,11 +247,7 @@ function FormattedContent({ content }: { content: string }) {
     <div style={styles.content}>
       {parts.map((part, i) => {
         if (part.type === 'code-block') {
-          return (
-            <pre key={i} style={styles.codeBlock}>
-              <code>{part.text}</code>
-            </pre>
-          );
+          return <HighlightedBlock key={i} text={part.text} lang={part.lang} />;
         }
         if (part.type === 'paragraph') {
           return (
@@ -240,11 +262,34 @@ function FormattedContent({ content }: { content: string }) {
   );
 }
 
-type ContentPart = { type: 'code-block' | 'paragraph'; text: string };
+type ContentPart = { type: 'code-block'; text: string; lang: string } | { type: 'paragraph'; text: string };
+
+// ── HighlightedBlock ──────────────────────────────────────────────────────────
+// Renders a syntax-highlighted code block using highlight.js (loaded from CDN).
+// Falls back gracefully to plain text if hljs hasn't loaded yet.
+
+function HighlightedBlock({ text, lang }: { text: string; lang: string }) {
+  const ref = useRef<HTMLElement>(null);
+
+  useEffect(() => {
+    if (ref.current && window.hljs) {
+      window.hljs.highlightElement(ref.current);
+    }
+  });
+
+  return (
+    <pre style={styles.codeBlock}>
+      <code ref={ref} className={lang ? `language-${lang}` : undefined}>
+        {text}
+      </code>
+    </pre>
+  );
+}
 
 function parseContent(content: string): ContentPart[] {
   const parts: ContentPart[] = [];
-  const codeBlockRegex = /```(?:[a-z]*)?\n?([\s\S]*?)```/g;
+  // Capture optional language hint after the opening fence (e.g. ```typescript)
+  const codeBlockRegex = /```([a-zA-Z0-9_+-]*)\n?([\s\S]*?)```/g;
   let lastIndex = 0;
   let match: RegExpExecArray | null;
 
@@ -253,7 +298,7 @@ function parseContent(content: string): ContentPart[] {
       const prose = content.slice(lastIndex, match.index).trim();
       if (prose) parts.push({ type: 'paragraph', text: prose });
     }
-    parts.push({ type: 'code-block', text: match[1].trimEnd() });
+    parts.push({ type: 'code-block', lang: match[1].toLowerCase(), text: match[2].trimEnd() });
     lastIndex = match.index + match[0].length;
   }
 
