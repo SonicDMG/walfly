@@ -781,39 +781,69 @@ function renderInline(text: string, baseKey: number): React.ReactNode[] {
   });
 }
 
-// ── Styles — Walfly dark theme ─────────────────────────────────────────────
+// ── Styles — light wiki + Walfly brand accents ─────────────────────────────
+//
+// Light background for readability. Walfly touches:
+//   • Georgia wordmark in the header
+//   • Amber (#F5A623) for citations, active states, links, send button
+//   • Code blocks stay dark (tokyo-night-dark hljs theme)
+
+const w = {
+  // Page surfaces
+  bg:         '#ffffff',
+  surface:    '#f7f8fa',
+  surfaceAlt: '#f0f1f3',
+  border:     '#e2e4e8',
+  divider:    '#d0d2d8',
+
+  // Text
+  text:       '#1a1a1f',
+  textMuted:  '#57606a',
+  textFaint:  '#8b949e',
+
+  // Walfly amber accent (unchanged from brand)
+  amber:      c.amber,       // #F5A623
+  amberLight: '#fff7e6',     // tinted bg for citation pills
+  amberBorder:'#fcd389',     // softer border for pills
+
+  // Code surfaces (dark — hljs tokyo-night-dark)
+  codeBg:     '#1E1E22',
+  codeBorder: '#2A2A2F',
+  codeText:   '#e2e4e8',
+} as const;
 
 const styles = {
   root: {
     display: 'flex',
     flexDirection: 'column' as const,
     height: '100dvh',
-    fontFamily: 'Inter, -apple-system, system-ui, sans-serif',
-    fontSize: '14px',
-    lineHeight: 1.6,
-    color: c.cream,
-    background: c.midnight,
+    fontFamily: '-apple-system, "Segoe UI", system-ui, sans-serif',
+    fontSize: '15px',
+    lineHeight: 1.65,
+    color: w.text,
+    background: w.bg,
   },
 
-  // ── Header ──
+  // ── Header — thin branded bar ──
   header: {
-    borderBottom: `1px solid ${c.border}`,
+    borderBottom: `1px solid ${w.border}`,
     padding: '10px 20px',
     flexShrink: 0,
     display: 'flex',
     alignItems: 'center',
     gap: '6px',
+    background: w.bg,
   },
-  // "walfly" wordmark — mirrors fonts.display (Playfair Display 700)
+  // Walfly wordmark — Georgia serif, matches app font.display feel
   title: {
     fontFamily: 'Georgia, "Times New Roman", serif',
     fontWeight: 700,
-    fontSize: '16px',
-    color: c.cream,
-    letterSpacing: '1px',
+    fontSize: '17px',
+    color: w.text,
+    letterSpacing: '0.5px',
   },
-  subtitle: { color: c.mist, fontSize: '13px', flex: 1 },
-  repoLink: { color: c.amber, textDecoration: 'none', fontSize: '12px' },
+  subtitle: { color: w.textMuted, fontSize: '13px', flex: 1 },
+  repoLink:  { color: w.amber, textDecoration: 'none', fontSize: '12px' },
 
   body: {
     flex: 1,
@@ -825,13 +855,14 @@ const styles = {
   chatPane: {
     flex: 1,
     overflowY: 'auto' as const,
-    padding: '16px 20px',
+    padding: '20px 24px',
     minWidth: 0,
+    background: w.bg,
   },
   messageList: {
     display: 'flex',
     flexDirection: 'column' as const,
-    gap: '16px',
+    gap: '20px',
   },
 
   // Drag handle
@@ -839,57 +870,57 @@ const styles = {
     width: '4px',
     flexShrink: 0,
     cursor: 'col-resize',
-    background: c.border,
+    background: w.border,
     transition: 'background 0.15s',
   },
 
   // ── Bubbles ──
   bubble: {
-    borderRadius: '12px',
+    borderRadius: '8px',
     padding: '12px 16px',
   },
   bubbleUser: {
-    background: c.amberSubtle,
-    border: `1px solid ${c.amberGlow}`,
+    background: w.amberLight,
+    border: `1px solid ${w.amberBorder}`,
     alignSelf: 'flex-end' as const,
-    maxWidth: '85%',
-    borderBottomRightRadius: '4px',
+    maxWidth: '80%',
+    borderBottomRightRadius: '3px',
   },
   bubbleAssistant: {
-    background: c.charcoal,
-    border: `1px solid ${c.border}`,
+    background: w.bg,
+    border: `1px solid ${w.border}`,
     width: '100%',
-    borderBottomLeftRadius: '4px',
+    borderBottomLeftRadius: '3px',
   },
   bubbleRole: {
     fontSize: '10px',
     fontWeight: 600,
-    color: c.mist,
+    color: w.textFaint,
     marginBottom: '6px',
     textTransform: 'uppercase' as const,
     letterSpacing: '0.08em',
   },
-  pending: { color: c.mist, fontStyle: 'italic' as const },
-  content: { display: 'flex', flexDirection: 'column' as const, gap: '8px' },
-  paragraph: { margin: 0, color: c.cream },
+  pending: { color: w.textMuted, fontStyle: 'italic' as const },
+  content: { display: 'flex', flexDirection: 'column' as const, gap: '10px' },
+  paragraph: { margin: 0, color: w.text, lineHeight: 1.7 },
 
   // Markdown block elements
-  h1: { fontFamily: 'Georgia, serif', fontSize: '18px', fontWeight: 700, color: c.cream, margin: '4px 0 2px', letterSpacing: '0.3px' },
-  h2: { fontFamily: 'Georgia, serif', fontSize: '16px', fontWeight: 700, color: c.cream, margin: '4px 0 2px' },
-  h3: { fontFamily: 'inherit', fontSize: '14px', fontWeight: 600, color: c.amber, margin: '4px 0 2px' },
-  hr: { border: 'none', borderTop: `1px solid ${c.border}`, margin: '8px 0' },
-  ul: { margin: '0', paddingLeft: '20px', color: c.cream },
-  ol: { margin: '0', paddingLeft: '20px', color: c.cream },
-  li: { marginBottom: '3px' },
+  h1: { fontFamily: 'Georgia, serif', fontSize: '20px', fontWeight: 700, color: w.text, margin: '6px 0 2px', borderBottom: `1px solid ${w.border}`, paddingBottom: '4px' },
+  h2: { fontFamily: 'Georgia, serif', fontSize: '17px', fontWeight: 700, color: w.text, margin: '6px 0 2px' },
+  h3: { fontFamily: 'inherit', fontSize: '15px', fontWeight: 600, color: w.textMuted, margin: '4px 0 2px' },
+  hr: { border: 'none', borderTop: `1px solid ${w.border}`, margin: '10px 0' },
+  ul: { margin: '0', paddingLeft: '22px', color: w.text },
+  ol: { margin: '0', paddingLeft: '22px', color: w.text },
+  li: { marginBottom: '4px', lineHeight: 1.6 },
 
-  // Citation pill spans — amber on dark
+  // Citation pills — amber accent, readable on white
   citationSpan: {
     display: 'inline-block',
     padding: '1px 7px',
     borderRadius: '4px',
-    background: c.amberSubtle,
-    border: `1px solid ${c.amberGlow}`,
-    color: c.amber,
+    background: w.amberLight,
+    border: `1px solid ${w.amberBorder}`,
+    color: '#92600a',           // dark amber — AA contrast on white
     fontSize: '12px',
     fontFamily: 'ui-monospace, "SF Mono", Consolas, monospace',
     cursor: 'pointer',
@@ -899,27 +930,27 @@ const styles = {
     margin: '0 2px',
   },
   citationActive: {
-    background: `${c.amber}28`,
-    border: `1px solid ${c.amber}`,
-    color: c.amber,
+    background: w.amber,
+    border: `1px solid ${w.amber}`,
+    color: '#1a1a1f',           // dark text on amber background
   },
 
   inlineCode: {
-    background: c.obsidian,
-    border: `1px solid ${c.border}`,
+    background: w.surface,
+    border: `1px solid ${w.border}`,
     borderRadius: '3px',
     padding: '1px 5px',
-    fontSize: '12px',
+    fontSize: '13px',
     fontFamily: 'ui-monospace, "SF Mono", Consolas, monospace',
-    color: c.amber,
+    color: '#c2185b',           // standard inline-code red — readable on white
   },
-  link: { color: c.amber, textDecoration: 'none' },
+  link: { color: w.amber, textDecoration: 'none' },
 
-  // ── Sidebar ──
+  // ── Sidebar — slightly off-white to distinguish from chat ──
   sidebar: {
     overflowY: 'auto' as const,
-    background: c.obsidian,
-    borderLeft: `1px solid ${c.border}`,
+    background: w.surface,
+    borderLeft: `1px solid ${w.border}`,
   },
   sidebarEmpty: {
     height: '100%',
@@ -929,7 +960,7 @@ const styles = {
     padding: '32px',
   },
   sidebarEmptyText: {
-    color: c.fog,
+    color: w.textFaint,
     fontSize: '13px',
     textAlign: 'center' as const,
     lineHeight: 1.7,
@@ -944,22 +975,22 @@ const styles = {
   sidebarHeading: {
     fontSize: '10px',
     fontWeight: 600,
-    color: c.mist,
+    color: w.textFaint,
     textTransform: 'uppercase' as const,
     letterSpacing: '0.1em',
   },
 
-  // ── Ref cards ──
+  // ── Ref cards — dark code blocks, light header ──
   refCard: {
     borderRadius: '8px',
-    border: `1px solid ${c.border}`,
-    background: c.charcoal,
+    border: `1px solid ${w.border}`,
+    background: w.bg,
     overflow: 'hidden',
     cursor: 'pointer',
     transition: 'border-color 0.15s',
   },
   refCardActive: {
-    border: `2px solid ${c.amber}`,
+    border: `2px solid ${w.amber}`,
     boxShadow: `0 0 0 3px ${c.amberGlow}`,
   },
   refCardHeader: {
@@ -967,20 +998,21 @@ const styles = {
     alignItems: 'center',
     justifyContent: 'space-between',
     padding: '7px 12px',
-    borderBottom: `1px solid ${c.border}`,
-    background: c.obsidian,
+    borderBottom: `1px solid ${w.codeBorder}`,
+    background: w.codeBg,          // dark header — blends into code block
   },
   refCardFilename: {
     fontSize: '12px',
     fontFamily: 'ui-monospace, "SF Mono", Consolas, monospace',
-    color: c.cream,
+    color: w.codeText,
     fontWeight: 500,
   },
   refCardLink: {
     fontSize: '11px',
-    color: c.amber,
+    color: w.amber,
     textDecoration: 'none',
   },
+  // Code blocks stay dark — tokyo-night-dark hljs theme
   refCodeBlock: {
     margin: 0,
     padding: '12px',
@@ -989,18 +1021,16 @@ const styles = {
     overflowX: 'auto' as const,
     maxHeight: '320px',
     overflowY: 'auto' as const,
-    // Keep our dark surface — hljs injects a stylesheet background on <pre>
-    // but inline style wins over class-based rules.
-    background: '#1E1E22',
-    borderRadius: '0 0 8px 8px', // matches refCard bottom radius
+    background: w.codeBg,          // inline style wins over hljs <pre> rule
+    borderRadius: '0 0 8px 8px',
   },
 
   // ── Footer / input ──
   footer: {
-    borderTop: `1px solid ${c.border}`,
+    borderTop: `1px solid ${w.border}`,
     padding: '12px 20px',
     flexShrink: 0,
-    background: c.midnight,
+    background: w.bg,
   },
   inputRow: {
     display: 'flex',
@@ -1009,22 +1039,23 @@ const styles = {
   textarea: {
     flex: 1,
     padding: '10px 14px',
-    border: `1px solid ${c.border}`,
+    border: `1px solid ${w.border}`,
     borderRadius: '20px',
     fontSize: '14px',
     lineHeight: 1.5,
     fontFamily: 'inherit',
     resize: 'none' as const,
     outline: 'none',
-    background: c.charcoal,
-    color: c.cream,
+    background: w.surface,
+    color: w.text,
   },
+  // Amber send button — the one strong brand element in the input bar
   sendBtn: {
     width: '38px',
     height: '38px',
     borderRadius: '50%',
-    background: c.amber,
-    color: c.midnight,
+    background: w.amber,
+    color: '#1a1a1f',
     border: 'none',
     fontSize: '18px',
     fontWeight: 700,
@@ -1037,6 +1068,6 @@ const styles = {
   hint: {
     margin: '6px 0 0',
     fontSize: '11px',
-    color: c.fog,
+    color: w.textFaint,
   },
 } as const;
