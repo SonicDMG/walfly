@@ -1,0 +1,83 @@
+{
+  "repo_notes": [
+    {
+      "content": "Walfly is a monorepo with three main packages: (1) apps/mobile — an Expo/React Native app for iOS/Android/web that records audio, streams it live, and lets users chat with their recordings. (2) packages/api — a Next.js 16 app that is the entire backend: REST API routes, LLM chat, audio storage, transcription orchestration, and a /wiki developer Q&A tool. (3) packages/db — a shared TypeScript library wrapping DataStax Astra DB (Cassandra + vector search) used by the API. There is also a Python sidecar at packages/api/sidecar that handles audio transcription via Whisper/Docling and streams results over WebSocket.",
+      "author": "walfly team"
+    },
+    {
+      "content": "The recording lifecycle is the core of the product: (1) Mobile app opens a WebSocket session via POST /api/recordings/session, gets a ws-ticket, then streams raw audio chunks to the sidecar. (2) The sidecar transcribes in real-time and emits partial transcript events back. (3) On stop, the mobile app calls POST /api/recordings/{id}/finalize. (4) The API pipeline (lib/pipeline.ts) enriches the transcript: LLM summarisation, key takeaway extraction, moment detection via JEV (lib/jev.ts), and music detection. (5) Status progresses: recording → transcribing → enriching → ready. Failed recordings enter a recovery flow.",
+      "author": "walfly team"
+    },
+    {
+      "content": "The recovery system (lib/recover.ts, lib/recoverPolicy.ts) handles recordings that got stuck or failed mid-pipeline. It can re-upload audio from Vercel Blob, re-run transcription, and re-run enrichment. Recovery routes live under /api/recordings/{id}/recover/. The recoverPolicy determines which recovery path to take based on what state the recording is in.",
+      "author": "walfly team"
+    },
+    {
+      "content": "LLM usage: all LLM calls go through lib/llm.ts which wraps the OpenAI SDK pointed at any OpenAI-compatible proxy (OpenRouter, LiteLLM, Ollama). Configured entirely via env vars: LLM_BASE_URL, LLM_API_KEY, LLM_MODEL. The chat endpoint (/api/chat) uses Astra vector search to find relevant recordings and streams answers as SSE. The wiki endpoint (/api/wiki/chat) fetches live file contents from GitHub and streams grounded answers about the codebase itself.",
+      "author": "walfly team"
+    },
+    {
+      "content": "Audio storage has two modes: local filesystem (packages/api/.data/audio, served by /api/recordings/audio/[filename]) for local dev, and Vercel Blob for production. The abstraction lives in lib/storage.ts. lib/store.ts handles all Astra DB interactions for recording state.",
+      "author": "walfly team"
+    }
+  ],
+  "pages": [
+    {
+      "title": "Architecture Overview",
+      "purpose": "High-level diagram and explanation of the three-package monorepo: mobile app, Next.js API, shared DB library, and Python sidecar. Show how they connect and which technologies each uses."
+    },
+    {
+      "title": "Recording Lifecycle",
+      "purpose": "End-to-end walkthrough of a recording from capture to ready state: WebSocket session creation, audio streaming to the sidecar, real-time transcription, finalization, and the enrichment pipeline (summarisation, key takeaways, moment detection, music detection). Include the status state machine.",
+      "parent": "Architecture Overview"
+    },
+    {
+      "title": "Recovery Flow",
+      "purpose": "How failed or stuck recordings are detected and recovered. Document the recovery policy decision tree, the recovery routes under /api/recordings/{id}/recover/, and the conditions under which each recovery path is chosen.",
+      "parent": "Architecture Overview"
+    },
+    {
+      "title": "API Routes",
+      "purpose": "Complete reference for all Next.js API route handlers under packages/api/app/api/. Group by resource: recordings (CRUD, session, upload, finalize, process, recover, segments, ws-ticket, audio), chat, moments/clusters, health, and wiki/chat. Document request/response shapes."
+    },
+    {
+      "title": "Chat & RAG",
+      "purpose": "How the /api/chat endpoint works: Astra vector search to find relevant recordings, context injection strategy (full transcript vs summary-only), the similarity threshold, streaming SSE response format, and the FORMATTING_INSTRUCTIONS prompt.",
+      "parent": "API Routes"
+    },
+    {
+      "title": "Live Codebase Wiki",
+      "purpose": "Document the /wiki developer tool and its /api/wiki/chat backend. Explain the two-stage pipeline: GitHub file tree fetch (60s cache), LLM-based file selection, live raw content fetch, and grounded streaming answer with citations. Cover lib/github.ts helpers.",
+      "parent": "API Routes"
+    },
+    {
+      "title": "Mobile App",
+      "purpose": "Overview of the Expo/React Native app in apps/mobile. Cover the tab structure (index, recordings, chat), the recording screen and hooks, how it connects to the API (base URL config, WebSocket session flow), and the ChatScreen component."
+    },
+    {
+      "title": "Recording UI & Hooks",
+      "purpose": "Deep dive into the mobile recording experience: the recording screen, audio capture hooks, real-time transcript display, ProgressIndicator component, and the TagEditor.",
+      "parent": "Mobile App"
+    },
+    {
+      "title": "Database Layer",
+      "purpose": "Document packages/db: the Astra DB client setup, the recordings_v2 collection schema (fields, vector index, searchTokens for hybrid search), capability detection (hybrid vs vector-only), and the clampVectorizeText utility."
+    },
+    {
+      "title": "LLM Integration",
+      "purpose": "Document lib/llm.ts: the OpenAI-SDK wrapper, env var configuration (LLM_BASE_URL, LLM_API_KEY, LLM_MODEL, JEV_MODEL, MUSIC_DETECTION_MODEL), provider detection, JSON mode handling, and the JEV moment classification system in lib/jev.ts."
+    },
+    {
+      "title": "Audio Storage & Pipeline",
+      "purpose": "Document lib/storage.ts (local vs Vercel Blob abstraction), lib/pipeline.ts (enrichment orchestration), lib/transcribe.ts and lib/whisper.ts (transcription helpers), lib/enrich.ts, and lib/music.ts (music/lyric detection)."
+    },
+    {
+      "title": "Python Transcription Sidecar",
+      "purpose": "Document the Python sidecar at packages/api/sidecar: how it receives audio over WebSocket, runs Whisper/Docling transcription, emits partial transcript events, and how it is started (uv run). Cover the WALFLY_WS_SECRET ticket validation."
+    },
+    {
+      "title": "Local Development Setup",
+      "purpose": "Step-by-step guide to running Walfly locally: environment variables (all .env.example fields explained), starting the three processes (sidecar, API, mobile), iOS simulator setup, and common troubleshooting. Reference SETUP.md."
+    }
+  ]
+}
