@@ -1,13 +1,13 @@
 <div align="center">
 
-```
+<pre>
 ██╗    ██╗ █████╗ ██╗     ███████╗██╗  ██╗   ██╗
 ██║    ██║██╔══██╗██║     ██╔════╝██║  ╚██╗ ██╔╝
 ██║ █╗ ██║███████║██║     █████╗  ██║   ╚████╔╝
 ██║███╗██║██╔══██║██║     ██╔══╝  ██║    ╚██╔╝
 ╚███╔███╔╝██║  ██║███████╗██║     ███████╗██║
  ╚══╝╚══╝ ╚═╝  ╚═╝╚══════╝╚═╝     ╚══════╝╚═╝
-```
+</pre>
 
 [![Expo SDK](https://img.shields.io/badge/Expo-SDK%2057-000020?logo=expo&logoColor=white)](https://expo.dev)
 [![Next.js](https://img.shields.io/badge/Next.js-16-black?logo=next.js)](https://nextjs.org)
