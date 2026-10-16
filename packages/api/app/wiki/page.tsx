@@ -22,8 +22,23 @@ declare global {
   }
 }
 
-const REPO_URL = 'https://github.com/SonicDMG/walfly';
+const REPO_URL  = 'https://github.com/SonicDMG/walfly';
 const REPO_BASE = 'https://github.com/SonicDMG/walfly/blob/main';
+
+// ── Walfly design tokens (mirrors apps/mobile/lib/theme.ts) ───────────────
+const c = {
+  midnight:    '#0D0D0F',
+  obsidian:    '#141416',
+  charcoal:    '#1E1E22',
+  border:      '#2A2A2F',
+  amber:       '#F5A623',
+  amberDim:    '#C4801A',
+  amberGlow:   '#F5A62326',
+  amberSubtle: '#F5A62312',
+  cream:       '#F5EDD6',
+  mist:        '#9B9AA3',
+  fog:         '#55545D',
+} as const;
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -110,7 +125,7 @@ export default function WikiPage() {
     const link = document.createElement('link');
     link.id = 'hljs-css';
     link.rel = 'stylesheet';
-    link.href = 'https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.10.0/styles/github-dark.min.css';
+    link.href = 'https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.10.0/styles/tokyo-night-dark.min.css';
     document.head.appendChild(link);
     const script = document.createElement('script');
     script.src = 'https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.10.0/highlight.min.js';
@@ -580,7 +595,7 @@ function parseMessage(content: string): ParsedMessage {
       const text = (match[6] ?? '').trimEnd();
 
       if (pendingCitation) {
-        // Associate with the most recent citation.
+        // Normal case: citation immediately before this code block.
         const existing = refs.find((r) => r.label === pendingCitation!.label && r.text === '');
         if (existing) {
           existing.lang = lang;
@@ -592,11 +607,15 @@ function parseMessage(content: string): ParsedMessage {
         }
         pendingCitation = null;
       } else {
-        // Standalone code block with no citation — add as a ref with generic label.
-        const refIndex = refs.length;
-        const label = lang || 'code';
-        refs.push({ index: refIndex, lang, text, label, url: REPO_URL });
-        prose.push({ type: 'citation', refIndex, label, url: REPO_URL });
+        // No preceding citation — check if the most recent ref in the prose
+        // has empty text (citation emitted after code block rather than before).
+        const lastRef = refs.length > 0 ? refs[refs.length - 1] : null;
+        if (lastRef && lastRef.text === '') {
+          lastRef.lang = lang;
+          lastRef.text = text;
+        }
+        // If still no home for this code block, keep it inline rather than
+        // creating a sidebar card with a broken repo-homepage URL.
       }
     }
   }
@@ -635,30 +654,39 @@ function renderInline(text: string, baseKey: number): React.ReactNode[] {
   });
 }
 
-// ── Styles ─────────────────────────────────────────────────────────────────
+// ── Styles — Walfly dark theme ─────────────────────────────────────────────
 
 const styles = {
   root: {
     display: 'flex',
     flexDirection: 'column' as const,
     height: '100dvh',
-    fontFamily: '-apple-system, "Segoe UI", system-ui, sans-serif',
+    fontFamily: 'Inter, -apple-system, system-ui, sans-serif',
     fontSize: '14px',
     lineHeight: 1.6,
-    color: '#1f2328',
-    background: '#ffffff',
+    color: c.cream,
+    background: c.midnight,
   },
+
+  // ── Header ──
   header: {
-    borderBottom: '1px solid #e5e7eb',
+    borderBottom: `1px solid ${c.border}`,
     padding: '10px 20px',
     flexShrink: 0,
     display: 'flex',
     alignItems: 'center',
-    gap: '4px',
+    gap: '6px',
   },
-  title: { fontWeight: 600, fontSize: '15px' },
-  subtitle: { color: '#57606a', fontSize: '13px', flex: 1 },
-  repoLink: { color: '#3b82d4', textDecoration: 'none', fontSize: '12px' },
+  // "walfly" wordmark — mirrors fonts.display (Playfair Display 700)
+  title: {
+    fontFamily: 'Georgia, "Times New Roman", serif',
+    fontWeight: 700,
+    fontSize: '16px',
+    color: c.cream,
+    letterSpacing: '1px',
+  },
+  subtitle: { color: c.mist, fontSize: '13px', flex: 1 },
+  repoLink: { color: c.amber, textDecoration: 'none', fontSize: '12px' },
 
   body: {
     flex: 1,
@@ -671,56 +699,61 @@ const styles = {
     flex: 1,
     overflowY: 'auto' as const,
     padding: '16px 20px',
-    minWidth: 0, // prevent flex blowout
+    minWidth: 0,
   },
   messageList: {
     display: 'flex',
     flexDirection: 'column' as const,
     gap: '16px',
   },
-  // Drag handle between chat and sidebar
+
+  // Drag handle
   divider: {
     width: '4px',
     flexShrink: 0,
     cursor: 'col-resize',
-    background: '#e5e7eb',
+    background: c.border,
     transition: 'background 0.15s',
   },
+
+  // ── Bubbles ──
   bubble: {
-    borderRadius: '8px',
+    borderRadius: '12px',
     padding: '12px 16px',
   },
   bubbleUser: {
-    background: '#f7f8fa',
-    border: '1px solid #e5e7eb',
+    background: c.amberSubtle,
+    border: `1px solid ${c.amberGlow}`,
     alignSelf: 'flex-end' as const,
     maxWidth: '85%',
+    borderBottomRightRadius: '4px',
   },
   bubbleAssistant: {
-    background: '#ffffff',
-    border: '1px solid #e5e7eb',
+    background: c.charcoal,
+    border: `1px solid ${c.border}`,
     width: '100%',
+    borderBottomLeftRadius: '4px',
   },
   bubbleRole: {
-    fontSize: '11px',
+    fontSize: '10px',
     fontWeight: 600,
-    color: '#57606a',
+    color: c.mist,
     marginBottom: '6px',
     textTransform: 'uppercase' as const,
-    letterSpacing: '0.05em',
+    letterSpacing: '0.08em',
   },
-  pending: { color: '#57606a', fontStyle: 'italic' as const },
+  pending: { color: c.mist, fontStyle: 'italic' as const },
   content: { display: 'flex', flexDirection: 'column' as const, gap: '6px' },
-  paragraph: { margin: 0 },
+  paragraph: { margin: 0, color: c.cream },
 
-  // Citation spans — look like pill tags, not links
+  // Citation pill spans — amber on dark
   citationSpan: {
     display: 'inline-block',
     padding: '1px 7px',
     borderRadius: '4px',
-    background: '#eef2ff',
-    border: '1px solid #c7d2fe',
-    color: '#3730a3',
+    background: c.amberSubtle,
+    border: `1px solid ${c.amberGlow}`,
+    color: c.amber,
     fontSize: '12px',
     fontFamily: 'ui-monospace, "SF Mono", Consolas, monospace',
     cursor: 'pointer',
@@ -730,26 +763,27 @@ const styles = {
     margin: '0 2px',
   },
   citationActive: {
-    background: '#fef3c7',
-    border: '1px solid #f59e0b',
-    color: '#92400e',
+    background: `${c.amber}28`,
+    border: `1px solid ${c.amber}`,
+    color: c.amber,
   },
 
   inlineCode: {
-    background: '#f7f8fa',
-    border: '1px solid #e5e7eb',
+    background: c.obsidian,
+    border: `1px solid ${c.border}`,
     borderRadius: '3px',
     padding: '1px 5px',
     fontSize: '12px',
     fontFamily: 'ui-monospace, "SF Mono", Consolas, monospace',
+    color: c.amber,
   },
-  link: { color: '#3b82d4', textDecoration: 'none' },
+  link: { color: c.amber, textDecoration: 'none' },
 
   // ── Sidebar ──
   sidebar: {
     overflowY: 'auto' as const,
-    background: '#f7f8fa',
-    borderLeft: '1px solid #e5e7eb',
+    background: c.obsidian,
+    borderLeft: `1px solid ${c.border}`,
   },
   sidebarEmpty: {
     height: '100%',
@@ -759,7 +793,7 @@ const styles = {
     padding: '32px',
   },
   sidebarEmptyText: {
-    color: '#57606a',
+    color: c.fog,
     fontSize: '13px',
     textAlign: 'center' as const,
     lineHeight: 1.7,
@@ -772,43 +806,43 @@ const styles = {
     gap: '12px',
   },
   sidebarHeading: {
-    fontSize: '11px',
+    fontSize: '10px',
     fontWeight: 600,
-    color: '#57606a',
+    color: c.mist,
     textTransform: 'uppercase' as const,
-    letterSpacing: '0.08em',
+    letterSpacing: '0.1em',
   },
 
   // ── Ref cards ──
   refCard: {
-    borderRadius: '6px',
-    border: '1px solid #e5e7eb',
-    background: '#ffffff',
+    borderRadius: '8px',
+    border: `1px solid ${c.border}`,
+    background: c.charcoal,
     overflow: 'hidden',
     cursor: 'pointer',
     transition: 'border-color 0.15s',
   },
   refCardActive: {
-    border: '2px solid #f59e0b',
-    boxShadow: '0 0 0 3px rgba(245,158,11,0.15)',
+    border: `2px solid ${c.amber}`,
+    boxShadow: `0 0 0 3px ${c.amberGlow}`,
   },
   refCardHeader: {
     display: 'flex',
     alignItems: 'center',
     justifyContent: 'space-between',
-    padding: '8px 12px',
-    borderBottom: '1px solid #e5e7eb',
-    background: '#f7f8fa',
+    padding: '7px 12px',
+    borderBottom: `1px solid ${c.border}`,
+    background: c.obsidian,
   },
   refCardFilename: {
     fontSize: '12px',
     fontFamily: 'ui-monospace, "SF Mono", Consolas, monospace',
-    color: '#1f2328',
+    color: c.cream,
     fontWeight: 500,
   },
   refCardLink: {
     fontSize: '11px',
-    color: '#3b82d4',
+    color: c.amber,
     textDecoration: 'none',
   },
   refCodeBlock: {
@@ -819,13 +853,15 @@ const styles = {
     overflowX: 'auto' as const,
     maxHeight: '320px',
     overflowY: 'auto' as const,
+    background: c.charcoal,
   },
 
   // ── Footer / input ──
   footer: {
-    borderTop: '1px solid #e5e7eb',
+    borderTop: `1px solid ${c.border}`,
     padding: '12px 20px',
     flexShrink: 0,
+    background: c.midnight,
   },
   inputRow: {
     display: 'flex',
@@ -833,28 +869,35 @@ const styles = {
   },
   textarea: {
     flex: 1,
-    padding: '10px 12px',
-    border: '1px solid #e5e7eb',
-    borderRadius: '6px',
+    padding: '10px 14px',
+    border: `1px solid ${c.border}`,
+    borderRadius: '20px',
     fontSize: '14px',
     lineHeight: 1.5,
     fontFamily: 'inherit',
     resize: 'none' as const,
     outline: 'none',
+    background: c.charcoal,
+    color: c.cream,
   },
   sendBtn: {
-    padding: '0 18px',
-    background: '#1f2328',
-    color: '#ffffff',
+    width: '38px',
+    height: '38px',
+    borderRadius: '50%',
+    background: c.amber,
+    color: c.midnight,
     border: 'none',
-    borderRadius: '6px',
     fontSize: '18px',
+    fontWeight: 700,
     cursor: 'pointer',
     flexShrink: 0,
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   hint: {
     margin: '6px 0 0',
     fontSize: '11px',
-    color: '#57606a',
+    color: c.fog,
   },
 } as const;

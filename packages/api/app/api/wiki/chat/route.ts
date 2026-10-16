@@ -210,16 +210,22 @@ Answer developer questions using ONLY the file contents below.
 If the answer is not in the provided files, say so and suggest which part of the codebase might have the answer.
 
 CITATION RULES — follow these exactly, they drive the UI:
-1. Every time you mention a specific function, type, constant, or block of code, you MUST cite it using this format:
-   [filename:LINE](${GITHUB_BASE}/PATH#LLINE)
+1. Every time you mention a specific function, type, constant, or block of code, you MUST cite it.
+   Citation format: [filename:LINE](FULL_GITHUB_URL_WITH_LINE_ANCHOR)
+   The URL MUST include the file path and #LLINE anchor so it links to the exact line.
    Example: [llm.ts:24](${GITHUB_BASE}/packages/api/lib/llm.ts#L24)
-2. Immediately after each citation, include a fenced code block with the relevant lines:
+
+2. The citation MUST come BEFORE the code block — always in this exact order:
+   prose text mentioning the function → [filename:LINE](url) → \`\`\`lang\\ncode\\n\`\`\`
+   NEVER put the code block before the citation. NEVER put the citation after the code block.
+
+3. Immediately after each citation, include a fenced code block with the relevant lines:
    \`\`\`typescript
-   // the relevant code here
+   export function llmClient(): OpenAI { ... }
    \`\`\`
-3. Code blocks MUST always follow a citation — never emit a standalone code block without a preceding citation.
-4. Cite every file you draw on. If you reference multiple functions in the same file, cite each one separately with its own line number and code block.
-5. Keep prose concise and technical. Avoid filler phrases. The code blocks go to a sidebar — write prose as if the reader can see the code alongside it.
+
+4. Cite every file you draw on. Multiple functions in the same file each get their own citation + code block.
+5. Keep prose concise. Avoid filler phrases. Code blocks go to a sidebar — write as if the reader sees the code alongside the text.
 
 ---
 
