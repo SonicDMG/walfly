@@ -3,10 +3,20 @@
  *
  * Helpers for fetching live codebase content from GitHub.
  *
- * The file tree is cached in-memory for TREE_TTL_MS (60 s) so that every chat
- * turn does not burn a GitHub API call just to get the file list. File contents
- * are always fetched live — never cached — so answers are always grounded in
- * the current state of the repo.
+ * Two in-memory caches — both tied to the same TTL so they expire together:
+ *
+ *   Tree cache   — the flat file list for the repo (single entry, 60 s TTL).
+ *                  Avoids burning a GitHub API call on every chat turn just to
+ *                  get the file list.
+ *
+ *   Content cache — raw text of individual files, keyed by
+ *                   "<owner>/<repo>/<branch>/<path>" (max FILE_CACHE_MAX entries,
+ *                   5 min TTL). The same 10-15 files are fetched repeatedly for
+ *                   related questions; caching them saves ~300 ms per follow-up
+ *                   and significantly reduces GitHub API usage.
+ *
+ *   Both caches are invalidated together when the tree TTL expires, so cached
+ *   file contents are never older than the tree snapshot they were selected from.
  *
  * With GITHUB_TOKEN set, the authenticated rate limit is 5 000 req/hr.
  * Without it, the unauthenticated limit is 60 req/hr — fine for local dev.
@@ -24,9 +34,14 @@ interface GitHubTreeResponse {
 }
 
 const TREE_TTL_MS = 60_000;
+const FILE_TTL_MS = 5 * 60_000; // 5 minutes
+const FILE_CACHE_MAX = 50;      // max cached files; evicts oldest on overflow
 
 // Single-entry in-memory cache — one repo, one branch.
 let treeCache: { entries: TreeEntry[]; expiresAt: number } | null = null;
+
+// File content cache — keyed by "<owner>/<repo>/<branch>/<path>".
+const fileCache = new Map<string, { text: string; expiresAt: number }>();
 
 function githubHeaders(): HeadersInit {
   const token = process.env.GITHUB_TOKEN;
@@ -74,7 +89,9 @@ export async function getFileTree(owner: string, repo: string): Promise<TreeEntr
 
 /**
  * Fetches the raw content of multiple files in parallel from the default branch.
- * Files that 404 or fail are silently omitted from the result map.
+ * Results are cached for FILE_TTL_MS (5 min). Cache entries are evicted LRU-style
+ * when FILE_CACHE_MAX is exceeded. Files that 404 or fail are omitted from the
+ * result map (not cached, so a transient failure is retried next turn).
  */
 export async function fetchFileContents(
   owner: string,
@@ -82,8 +99,31 @@ export async function fetchFileContents(
   paths: string[],
   branch = 'main',
 ): Promise<Record<string, string>> {
+  const now = Date.now();
+  const contents: Record<string, string> = {};
+  const toFetch: string[] = [];
+
+  // Partition: serve cache hits immediately, collect misses.
+  for (const path of paths) {
+    const key = `${owner}/${repo}/${branch}/${path}`;
+    const cached = fileCache.get(key);
+    if (cached && now < cached.expiresAt) {
+      contents[path] = cached.text;
+    } else {
+      toFetch.push(path);
+    }
+  }
+
+  const cacheHits = paths.length - toFetch.length;
+  if (cacheHits > 0) {
+    console.log(`[github] file cache: ${cacheHits} hit(s), ${toFetch.length} miss(es)`);
+  }
+
+  if (toFetch.length === 0) return contents;
+
+  // Fetch misses in parallel.
   const results = await Promise.allSettled(
-    paths.map(async (path) => {
+    toFetch.map(async (path) => {
       const url = `https://raw.githubusercontent.com/${owner}/${repo}/${branch}/${path}`;
       const res = await fetch(url, { headers: githubHeaders() });
       if (!res.ok) {
@@ -95,12 +135,21 @@ export async function fetchFileContents(
     }),
   );
 
-  const contents: Record<string, string> = {};
   for (const result of results) {
     if (result.status === 'fulfilled' && result.value) {
-      contents[result.value.path] = result.value.text;
+      const { path, text } = result.value;
+      contents[path] = text;
+
+      // Store in cache, evicting the oldest entry if at capacity.
+      const key = `${owner}/${repo}/${branch}/${path}`;
+      if (fileCache.size >= FILE_CACHE_MAX) {
+        const oldestKey = fileCache.keys().next().value;
+        if (oldestKey !== undefined) fileCache.delete(oldestKey);
+      }
+      fileCache.set(key, { text, expiresAt: now + FILE_TTL_MS });
     }
   }
+
   return contents;
 }
 
