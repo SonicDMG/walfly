@@ -68,8 +68,41 @@ export default function WikiPage() {
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
   const [activeRef, setActiveRef] = useState<number | null>(null);
+  const [sidebarWidth, setSidebarWidth] = useState(380); // px
+  const isDragging = useRef(false);
+  const dragStartX = useRef(0);
+  const dragStartWidth = useRef(0);
+  const containerRef = useRef<HTMLDivElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+
+  // ── Drag-to-resize divider ────────────────────────────────────────────────
+  const onDividerMouseDown = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    isDragging.current = true;
+    dragStartX.current = e.clientX;
+    dragStartWidth.current = sidebarWidth;
+
+    const onMouseMove = (ev: MouseEvent) => {
+      if (!isDragging.current || !containerRef.current) return;
+      const containerW = containerRef.current.offsetWidth;
+      const delta = dragStartX.current - ev.clientX; // dragging left = bigger sidebar
+      const next = Math.min(
+        Math.max(dragStartWidth.current + delta, 240), // min 240 px
+        containerW - 320,                               // max: leave 320 px for chat
+      );
+      setSidebarWidth(next);
+    };
+
+    const onMouseUp = () => {
+      isDragging.current = false;
+      window.removeEventListener('mousemove', onMouseMove);
+      window.removeEventListener('mouseup', onMouseUp);
+    };
+
+    window.addEventListener('mousemove', onMouseMove);
+    window.addEventListener('mouseup', onMouseUp);
+  }, [sidebarWidth]);
 
   // Inject highlight.js + GitHub Dark theme from CDN once on mount.
   useEffect(() => {
@@ -205,9 +238,9 @@ export default function WikiPage() {
       </header>
 
       {/* ── Body: chat + sidebar ── */}
-      <div style={styles.body}>
+      <div ref={containerRef} style={styles.body}>
 
-        {/* Left: chat pane */}
+        {/* Left: chat pane — fills remaining space */}
         <div style={styles.chatPane}>
           <div style={styles.messageList}>
             {messages.map((msg) => (
@@ -224,8 +257,15 @@ export default function WikiPage() {
           </div>
         </div>
 
-        {/* Right: sidebar */}
-        <aside style={styles.sidebar}>
+        {/* Drag handle */}
+        <div
+          style={styles.divider}
+          onMouseDown={onDividerMouseDown}
+          title="Drag to resize"
+        />
+
+        {/* Right: sidebar — fixed pixel width, user-resizable */}
+        <aside style={{ ...styles.sidebar, width: sidebarWidth, flexShrink: 0 }}>
           <Sidebar
             refs={parsedLatest?.refs ?? []}
             activeRef={activeRef}
@@ -628,17 +668,23 @@ const styles = {
 
   // ── Chat pane ──
   chatPane: {
-    flex: '0 0 60%',
+    flex: 1,
     overflowY: 'auto' as const,
-    padding: '20px',
-    borderRight: '1px solid #e5e7eb',
+    padding: '16px 20px',
+    minWidth: 0, // prevent flex blowout
   },
   messageList: {
     display: 'flex',
     flexDirection: 'column' as const,
     gap: '16px',
-    maxWidth: '640px',
-    margin: '0 auto',
+  },
+  // Drag handle between chat and sidebar
+  divider: {
+    width: '4px',
+    flexShrink: 0,
+    cursor: 'col-resize',
+    background: '#e5e7eb',
+    transition: 'background 0.15s',
   },
   bubble: {
     borderRadius: '8px',
@@ -701,9 +747,9 @@ const styles = {
 
   // ── Sidebar ──
   sidebar: {
-    flex: '0 0 40%',
     overflowY: 'auto' as const,
     background: '#f7f8fa',
+    borderLeft: '1px solid #e5e7eb',
   },
   sidebarEmpty: {
     height: '100%',
