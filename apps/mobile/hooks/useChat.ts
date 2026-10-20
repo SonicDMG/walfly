@@ -15,7 +15,7 @@
 import { useCallback, useRef, useState } from 'react';
 import { Platform } from 'react-native';
 import { fetch as expoFetch } from 'expo/fetch';
-import { apiUrl, describeRequestError } from '../lib/api';
+import { apiFetch, apiUrl, describeRequestError } from '../lib/api';
 
 export interface ChatMessage {
   role: 'user' | 'assistant';
@@ -108,13 +108,17 @@ async function postChat(
   history: ChatMessage[],
   recordingId: string | undefined,
 ): Promise<Response> {
-  const doFetch = (Platform.OS === 'web' ? fetch : expoFetch) as typeof fetch;
+  const fetchImpl = (Platform.OS === 'web' ? fetch : expoFetch) as typeof fetch;
   try {
-    return await doFetch(apiUrl('/api/chat'), {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ messages: history, recordingId }),
-    });
+    return await apiFetch(
+      apiUrl('/api/chat'),
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ messages: history, recordingId }),
+      },
+      fetchImpl,
+    );
   } catch (err) {
     throw new Error(describeRequestError(err, 'Chat failed'));
   }

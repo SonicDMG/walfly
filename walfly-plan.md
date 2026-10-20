@@ -9,6 +9,15 @@
 > collection is created without `defaultId` so `_id` stays a string. The stack
 > list, the schema block and the decisions table below have been corrected. The
 > per-ticket todo lists are left as written and are historical.
+>
+> **Also superseded (production-readiness pass):** the API is Dockerized and
+> deployed target-agnostically, not tied to Vercel; audio storage is
+> S3-compatible object storage (AWS S3 / R2 / B2 / MinIO), not Vercel Blob —
+> Vercel's request-body cap and `@vercel/blob` are both gone entirely; and a
+> single shared bearer token (`WALFLY_API_TOKEN`) now gates the API, so "no
+> auth" no longer holds either. Every mention of Vercel/Blob below is historical
+> context for *why* the original design looked the way it did, not the current
+> behavior. See `SETUP.md`'s "Deployment" section for what's actually true now.
 
 ## Overview
 
@@ -363,15 +372,15 @@ walfly/
 | Transcription service | Docling SaaS in the cloud (timestamped markdown; bytes always uploaded as multipart) |
 | Diarization | Post-MVP — transcript stored without speaker labels |
 | DB | Astra DB with built-in vectorize |
-| Audio blob storage | Vercel Blob |
-| API framework | Next.js API Routes on Vercel |
+| Audio blob storage | ~~Vercel Blob~~ → S3-compatible object storage (AWS S3 / R2 / B2 / MinIO), public-read bucket; local disk for dev only |
+| API framework | ~~Next.js API Routes on Vercel~~ → Next.js, Dockerized (`output: 'standalone'`), host-agnostic |
 | LLM gateway | LiteLLM or OpenRouter proxy (OpenAI-API-compatible) |
 | LLM model default | GPT-4o via proxy |
 | LLM APIs | OpenAI-compatible Chat Completions, streaming; stateless server, client-held history |
 | LLM model swappability | Via env vars LLM_BASE_URL / LLM_API_KEY / LLM_MODEL |
 | Chat scope | Per-recording (from detail screen) + global cross-recording (Tab 3) |
 | Chat RAG | Per-recording: that transcript, truncated. Global: Astra vector search injects titles/summaries/takeaways only |
-| Auth | None for MVP |
+| Auth | ~~None for MVP~~ → single shared bearer token (`WALFLY_API_TOKEN`), checked by `packages/api/proxy.ts` on every `/api/*` request except `/api/health` and `/api/wiki/*` |
 | Search mode | Hybrid (lexical + rerank) where the Astra region supports it, otherwise vector + `searchTokens` fused with RRF |
 | Location | Reverse-geocoded human name + raw coords |
 | Apple Watch | Post-MVP (ST-9) |

@@ -136,7 +136,7 @@ export interface RecordingPatch {
 /** GET /api/recordings/upload */
 export interface UploadCapabilities {
   maxUploadBytes: number;
-  storage: 'blob' | 'local';
+  storage: 's3' | 'local';
   acceptedMimeTypes: string[];
 }
 

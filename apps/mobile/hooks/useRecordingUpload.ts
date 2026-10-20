@@ -35,6 +35,7 @@ import {
   type AudioStreamBuffer,
 } from 'expo-audio';
 import {
+  apiFetch,
   apiUrl,
   describeRequestError,
   fetchWsTicket,
@@ -344,7 +345,7 @@ export function useRecordingUpload() {
           const isCurrentSession = orphanSessionId !== null && orphanSessionId === sessionIdRef.current;
           if (orphanSessionId && !stillPending && !isCurrentSession) {
             console.log(`[Crash Recovery] Finalizing orphaned session ${orphanSessionId}`);
-            await fetch(apiUrl(`/api/recordings/${encodeURIComponent(orphanSessionId)}/finalize`), {
+            await apiFetch(apiUrl(`/api/recordings/${encodeURIComponent(orphanSessionId)}/finalize`), {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({}),
@@ -439,7 +440,7 @@ export function useRecordingUpload() {
       );
 
       // 4. Session document.
-      const sessionRes = await fetch(apiUrl('/api/recordings/session'), {
+      const sessionRes = await apiFetch(apiUrl('/api/recordings/session'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ id: sessionId, createdAt: new Date(startedAt).toISOString() }),
@@ -610,7 +611,7 @@ export function useRecordingUpload() {
           );
         }
         safeSetProgress(0.3);
-        const finRes = await fetch(apiUrl(`/api/recordings/${encodeURIComponent(sessionId)}/finalize`), {
+        const finRes = await apiFetch(apiUrl(`/api/recordings/${encodeURIComponent(sessionId)}/finalize`), {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ duration: durationSec }),
@@ -746,7 +747,7 @@ async function deliverOneBuffer(recordingId: string): Promise<boolean> {
 /** A nudge; the Recordings list ticks non-terminal rows anyway. */
 async function tickPipelineOnce(recordingId: string): Promise<void> {
   try {
-    await fetch(apiUrl(`/api/recordings/${encodeURIComponent(recordingId)}/process`), { method: 'POST' });
+    await apiFetch(apiUrl(`/api/recordings/${encodeURIComponent(recordingId)}/process`), { method: 'POST' });
   } catch {
     // Best effort.
   }
@@ -792,7 +793,7 @@ async function patchLocation(sessionId: string, snapshot: LocationSnapshot | nul
   };
   if (snapshot.placeName) body.placeName = snapshot.placeName;
   try {
-    await fetch(apiUrl(`/api/recordings/${encodeURIComponent(sessionId)}`), {
+    await apiFetch(apiUrl(`/api/recordings/${encodeURIComponent(sessionId)}`), {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
@@ -821,7 +822,7 @@ async function drivePipeline(
 
     let res: Response;
     try {
-      res = await fetch(apiUrl(`/api/recordings/${id}/process`), { method: 'POST', signal });
+      res = await apiFetch(apiUrl(`/api/recordings/${id}/process`), { method: 'POST', signal });
     } catch (err) {
       if (isAbort(err)) return;
       if (++consecutiveFailures >= 3) throw new Error(describeRequestError(err, 'Processing failed'));

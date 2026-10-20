@@ -10,6 +10,10 @@ const path = require('path');
 
 /** @type {import('next').NextConfig} */
 const nextConfig = {
+  // A self-contained server bundle (.next/standalone) — what the Dockerfile
+  // builds and runs. Depends on the monorepo-aware tracing settings below.
+  output: 'standalone',
+
   // @walfly/db is consumed as raw TypeScript via main: ./src/index.ts.
   transpilePackages: ['@walfly/db'],
 

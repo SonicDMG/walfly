@@ -34,7 +34,7 @@ export const maxDuration = 60;
 
 interface UploadCapabilities {
   maxUploadBytes: number;
-  storage: 'blob' | 'local';
+  storage: 's3' | 'local';
   acceptedMimeTypes: string[];
 }
 

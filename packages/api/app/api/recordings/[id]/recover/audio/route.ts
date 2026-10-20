@@ -1,6 +1,6 @@
 import { DoclingError, normalizeAudioForAsr } from '@/lib/docling';
 import { recoverPathname } from '@/lib/recoverPolicy';
-import { storageMode, storeAudio } from '@/lib/storage';
+import { storeAudio } from '@/lib/storage';
 import { maxUploadBytes } from '@/lib/uploadLimits';
 import { NextRequest, NextResponse } from 'next/server';
 
@@ -8,24 +8,19 @@ export const runtime = 'nodejs';
 export const maxDuration = 60;
 
 /**
- * POST /api/recordings/{id}/recover/audio  (local storage mode only)
+ * POST /api/recordings/{id}/recover/audio
  *
- * Whole-file upload of the client's local buffer when no Blob store is
- * configured. Stores the bytes under the deterministic recovery pathname but
- * does not attach — one attach path exists in both modes (`/recover/complete`).
- * A local Next.js server has no request-body cap; the 100 MB guard applies.
+ * Whole-file upload of the client's local buffer — the one recovery-upload
+ * path in both storage modes. Stores the bytes under the deterministic
+ * recovery pathname but does not attach — one attach path exists regardless
+ * of storage mode (`/recover/complete`). Neither a self-hosted Next.js server
+ * nor Docling has a request-body cap; the `maxUploadBytes()` guard applies.
  */
 export async function POST(
   req: NextRequest,
   { params }: { params: Promise<{ id: string }> },
 ) {
   const { id } = await params;
-  if (storageMode() !== 'local') {
-    return NextResponse.json(
-      { error: 'Blob storage mode — upload via /recover/upload', code: 'blob_mode' },
-      { status: 409 },
-    );
-  }
 
   const form = await req.formData().catch(() => null);
   if (!form) {

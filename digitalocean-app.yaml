@@ -1,0 +1,102 @@
+# DigitalOcean App Platform spec — one command provisions both services
+# together as one "app", each getting a free *.ondigitalocean.app subdomain
+# with automatic HTTPS:
+#
+#   doctl apps create --spec digitalocean-app.yaml
+#
+# dockerfile_path is always relative to the repo root; omitting source_dir
+# (as below) defaults the Docker build context to the repo root too, which
+# both Dockerfiles need (npm workspace — packages/db must be reachable).
+#
+# DO has no auto-generated-secret feature (unlike Render's generateValue:
+# true) — generate WALFLY_API_TOKEN and WALFLY_WS_SECRET yourself
+# (openssl rand -hex 32 each) and fill them in below before running the
+# command above. Also unlike Render/Fly, DO's assigned subdomains include a
+# random suffix not knowable ahead of time, so SIDECAR_WS_URL can't be
+# pre-filled here — after the first deploy, read asr-service's assigned URL
+# from `doctl apps list` / the dashboard, then set SIDECAR_WS_URL on
+# api-service (scheme wss, path /v1/stream) and re-run the command above (it
+# updates the existing app in place). See SETUP.md's Deployment section.
+#
+# Needs real S3-compatible storage (DO has no bundled object storage, unlike
+# the self-hosted path's bundled Garage) — a free Cloudflare R2 bucket is
+# the easiest fit.
+name: walfly
+region: nyc
+services:
+  - name: api-service
+    dockerfile_path: packages/api/Dockerfile
+    http_port: 3000
+    instance_count: 1
+    instance_size_slug: basic-m
+    health_check:
+      http_path: /api/health
+      initial_delay_seconds: 20
+      period_seconds: 15
+      timeout_seconds: 5
+    envs:
+      - key: WALFLY_API_TOKEN
+        type: SECRET
+        value: "REPLACE_ME — openssl rand -hex 32"
+      - key: WALFLY_WS_SECRET
+        type: SECRET
+        value: "REPLACE_ME — openssl rand -hex 32, must match asr-service's below"
+      # DO's own component-URL binding — works out of the box, no manual step.
+      - key: SIDECAR_URL
+        value: ${asr-service.PUBLIC_URL}
+      # Fill in after the first deploy — see the comment block above.
+      - key: SIDECAR_WS_URL
+        value: "REPLACE_ME_AFTER_FIRST_DEPLOY — wss://<asr-service's assigned domain>/v1/stream"
+      - key: ASTRA_DB_API_ENDPOINT
+        type: SECRET
+        value: "REPLACE_ME"
+      - key: ASTRA_DB_APPLICATION_TOKEN
+        type: SECRET
+        value: "REPLACE_ME"
+      - key: LLM_BASE_URL
+        value: https://openrouter.ai/api/v1
+      - key: LLM_API_KEY
+        type: SECRET
+        value: "REPLACE_ME"
+      - key: LLM_MODEL
+        value: openai/gpt-oss-20b
+      - key: S3_ENDPOINT
+        type: SECRET
+        value: "REPLACE_ME"
+      - key: S3_REGION
+        value: auto
+      - key: S3_BUCKET
+        type: SECRET
+        value: "REPLACE_ME"
+      - key: S3_ACCESS_KEY_ID
+        type: SECRET
+        value: "REPLACE_ME"
+      - key: S3_SECRET_ACCESS_KEY
+        type: SECRET
+        value: "REPLACE_ME"
+      - key: S3_PUBLIC_BASE_URL
+        type: SECRET
+        value: "REPLACE_ME"
+      - key: CORS_ALLOW_ORIGIN
+        value: "*"
+
+  - name: asr-service
+    dockerfile_path: packages/api/sidecar/Dockerfile
+    http_port: 8888
+    instance_count: 1
+    instance_size_slug: basic-m
+    health_check:
+      http_path: /health
+      initial_delay_seconds: 10
+      period_seconds: 15
+      timeout_seconds: 5
+    envs:
+      # Must be identical to api-service's WALFLY_WS_SECRET above — DO has
+      # no cross-service secret-sharing binding, so copy the same value.
+      - key: WALFLY_WS_SECRET
+        type: SECRET
+        value: "REPLACE_ME — same value as api-service's WALFLY_WS_SECRET"
+      - key: ASR_WORKERS
+        value: "2"
+      - key: ASR_CPU_THREADS
+        value: "2"

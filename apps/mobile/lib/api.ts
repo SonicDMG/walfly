@@ -10,6 +10,56 @@
  */
 
 import { Platform } from 'react-native';
+import * as SecureStore from 'expo-secure-store';
+
+const API_TOKEN_KEY = 'walfly_api_token';
+
+/** undefined = not loaded from SecureStore yet; null = loaded, no token set. */
+let cachedToken: string | null | undefined;
+
+/** Reads the shared API bearer token, from cache after the first call. */
+export async function getApiToken(): Promise<string | null> {
+  if (cachedToken !== undefined) return cachedToken;
+  try {
+    cachedToken = (await SecureStore.getItemAsync(API_TOKEN_KEY)) ?? null;
+  } catch {
+    cachedToken = null;
+  }
+  return cachedToken;
+}
+
+/** Persists (or clears, with `null`) the shared API bearer token. */
+export async function setApiToken(token: string | null): Promise<void> {
+  cachedToken = token;
+  try {
+    if (token) {
+      await SecureStore.setItemAsync(API_TOKEN_KEY, token);
+    } else {
+      await SecureStore.deleteItemAsync(API_TOKEN_KEY);
+    }
+  } catch (err) {
+    console.warn('[api] failed to persist the API token:', err);
+  }
+}
+
+/**
+ * `fetch` with the shared bearer token attached, if one is set. The one
+ * import site every request in this app should go through — the API gates
+ * every route except /api/health and /api/wiki/* behind this token.
+ *
+ * Accepts an alternate fetch implementation for callers that need one (e.g.
+ * `expo/fetch` on native for a real streaming ReadableStream in useChat.ts).
+ */
+export async function apiFetch(
+  url: string,
+  init: RequestInit = {},
+  fetchImpl: typeof fetch = fetch,
+): Promise<Response> {
+  const token = await getApiToken();
+  const headers = new Headers(init.headers);
+  if (token) headers.set('Authorization', `Bearer ${token}`);
+  return fetchImpl(url, { ...init, headers });
+}
 
 const MISSING_BASE_URL_MESSAGE =
   'EXPO_PUBLIC_API_URL is not set. Create apps/mobile/.env with ' +
@@ -127,7 +177,7 @@ export interface SegmentPayload {
 
 /** Mints a short-lived ticket for the ASR sidecar WebSocket. */
 export async function fetchWsTicket(recordingId: string): Promise<StreamTicketResponse> {
-  const res = await fetch(apiUrl(`/api/recordings/${encodeURIComponent(recordingId)}/ws-ticket`), {
+  const res = await apiFetch(apiUrl(`/api/recordings/${encodeURIComponent(recordingId)}/ws-ticket`), {
     method: 'POST',
   });
   if (!res.ok) {
@@ -139,7 +189,7 @@ export async function fetchWsTicket(recordingId: string): Promise<StreamTicketRe
 
 /** Checkpoints one finalized streamed segment. Resolves only on a 2xx. */
 export async function postSegment(recordingId: string, segment: SegmentPayload): Promise<void> {
-  const res = await fetch(apiUrl(`/api/recordings/${encodeURIComponent(recordingId)}/segments`), {
+  const res = await apiFetch(apiUrl(`/api/recordings/${encodeURIComponent(recordingId)}/segments`), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(segment),

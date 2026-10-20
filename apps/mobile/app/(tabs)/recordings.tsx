@@ -23,6 +23,7 @@ import { useFocusEffect, useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { WEB_TAB_BAR_HEIGHT } from './_layout';
 import {
+  apiFetch,
   apiUrl,
   describeRequestError,
   isHibernationError,
@@ -97,7 +98,7 @@ export default function RecordingsScreen() {
       const ticks = await Promise.all(
         pending.map(async (row) => {
           try {
-            const res = await fetch(apiUrl(`/api/recordings/${row._id}/process`), { method: 'POST' });
+            const res = await apiFetch(apiUrl(`/api/recordings/${row._id}/process`), { method: 'POST' });
             if (!res.ok) return null;
             return (await res.json()) as ProcessResponse;
           } catch { return null; }
@@ -135,7 +136,7 @@ export default function RecordingsScreen() {
       const url = q
         ? apiUrl(`/api/recordings?q=${encodeURIComponent(q)}`)
         : apiUrl('/api/recordings');
-      const res = await fetch(url);
+      const res = await apiFetch(url);
       if (!res.ok) {
         let detail = '';
         let isHibernatingPayload = false;
@@ -187,7 +188,7 @@ export default function RecordingsScreen() {
     }
     setClustering(true);
     try {
-      const res = await fetch(apiUrl(`/api/moments/clusters?lens=${lens}&refresh=${forceRefresh ? 'true' : 'false'}`));
+      const res = await apiFetch(apiUrl(`/api/moments/clusters?lens=${lens}&refresh=${forceRefresh ? 'true' : 'false'}`));
       if (!res.ok) throw new Error(`Clustering failed (HTTP ${res.status})`);
       const data = (await res.json()) as ClusteredMomentsResponse;
       if (mountedRef.current) {

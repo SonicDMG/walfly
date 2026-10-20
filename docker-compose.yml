@@ -1,0 +1,92 @@
+# Turnkey self-host: `./deploy.sh` is the one-step path — it generates every
+# secret, stands up self-hosted S3-compatible storage (Garage) and an
+# automatic-HTTPS reverse proxy (Caddy) in front of everything, and brings
+# this up. See `deploy.sh` and SETUP.md's "Deployment" section.
+#
+# Running `docker compose up --build` directly also works once `.env` exists
+# (e.g. from a previous `./deploy.sh` run, or hand-written from
+# docker-compose.env.example) — `deploy.sh` is just what fills `.env` in.
+#
+# Nothing here assumes a specific platform (VPS, Render, Railway, a homelab
+# box all work identically) — only Caddy's two ports are published to the
+# host; api/sidecar/garage are reachable only inside this compose network.
+
+services:
+  caddy:
+    image: caddy:2-alpine
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      - CADDY_ADDRESS=${CADDY_ADDRESS:-:80}
+      # Garage's anonymous-read feature is Host-header-routed, not
+      # path-based — must stay in sync with S3_BUCKET and garage.toml's
+      # [s3_web] root_domain (deploy.sh keeps all three consistent).
+      - GARAGE_WEBSITE_HOST=${S3_BUCKET:-walfly-audio}.web.garage.internal
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      api:
+        condition: service_started
+      sidecar:
+        condition: service_started
+      garage:
+        condition: service_healthy
+    restart: unless-stopped
+
+  api:
+    build:
+      context: .
+      dockerfile: packages/api/Dockerfile
+    env_file:
+      - .env
+    environment:
+      # Container-to-container only — never operator-facing, so it isn't in .env.
+      - SIDECAR_URL=http://sidecar:8888
+    depends_on:
+      sidecar:
+        condition: service_started
+      garage:
+        condition: service_healthy
+    restart: unless-stopped
+
+  sidecar:
+    build:
+      context: .
+      dockerfile: packages/api/sidecar/Dockerfile
+      args:
+        ASR_MODEL: ${ASR_MODEL:-small.en}
+    env_file:
+      - .env
+    restart: unless-stopped
+
+  # Self-hosted S3-compatible object storage (Garage — see garage.toml.example
+  # for why not MinIO). No external account needed. Point S3_* at a
+  # real provider instead (AWS S3 / R2 / B2) by editing .env and removing this
+  # service + garage-init if you'd rather not run it.
+  garage:
+    image: dxflrs/garage:v2.4.1
+    command: ["/garage", "server", "--single-node", "--default-bucket"]
+    env_file:
+      - .env
+    volumes:
+      - ./garage.toml:/etc/garage.toml:ro
+      - garage_meta:/data/meta
+      - garage_data:/data/data
+    # The image has no shell (no /bin/sh) — exec-form only. This also lets
+    # garage-init below gate on service_healthy instead of a shell retry loop.
+    healthcheck:
+      test: ["CMD", "/garage", "status"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    restart: unless-stopped
+
+volumes:
+  caddy_data:
+  caddy_config:
+  garage_meta:
+  garage_data:

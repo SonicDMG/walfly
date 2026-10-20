@@ -33,10 +33,12 @@ There is no root env file — a root `.env` is read by neither.
 | `LLM_API_KEY` | **yes** (for enrichment and chat) | The proxy above | Use the literal string `ollama` for a local Ollama. |
 | `LLM_MODEL` | **yes** (for enrichment and chat) | The proxy's model list | **No default by design.** A wrong default produces a 404 that reads like a network failure. |
 | `LLM_JSON_MODE` | no | — | `off` disables `response_format: json_object` entirely. Anything else (including unset) attempts JSON mode and falls back automatically when the provider rejects it. |
-| `BLOB_READ_WRITE_TOKEN` | **only on Vercel** | Vercel dashboard → Storage → Blob → connect to the project | When unset locally, audio is written to `packages/api/.data/audio/` and served from `/api/recordings/audio/<name>`. When unset **on Vercel**, uploads hard-error: the filesystem there is read-only and per-instance. |
-| `CORS_ALLOW_ORIGIN` | no | — | Defaults to `*`, which is correct for this no-auth MVP and lets any Expo origin (port / LAN IP / tunnel) reach the API. Set an explicit origin once auth exists. |
-| `LOCAL_AUDIO_DIR` | no | — | Overrides the local audio directory. Default: `<cwd>/.data/audio`. Ignored in Blob mode. |
-| `VERCEL` | — | Set by Vercel automatically | Never set this yourself. It is what makes a missing `BLOB_READ_WRITE_TOKEN` a hard error instead of a local-disk fallback. |
+| `WALFLY_API_TOKEN` | **yes in production** | Generate with `openssl rand -hex 32` | The single shared bearer token (`Authorization: Bearer <token>`) required on every `/api/*` route except `/api/health` and `/api/wiki/*`. Unset → every gated route 500s on purpose (fail closed, not fail open). The mobile app prompts for it on first launch. |
+| `S3_BUCKET` | **only in production** | Your S3-compatible provider (AWS S3 / Cloudflare R2 / Backblaze B2 / MinIO) | When unset, audio is written to `packages/api/.data/audio/` and served from `/api/recordings/audio/<name>` — fine for local dev, **not** for production (an ephemeral or multi-instance container loses it on restart/redeploy). |
+| `S3_ENDPOINT` / `S3_REGION` / `S3_ACCESS_KEY_ID` / `S3_SECRET_ACCESS_KEY` / `S3_PUBLIC_BASE_URL` | with `S3_BUCKET` | Your provider's console | `S3_ENDPOINT` unset means real AWS S3; set it for R2/B2/MinIO. `S3_PUBLIC_BASE_URL` is the public-read base the bucket is reachable at — the app constructs object URLs itself and never signs or re-signs them, so the bucket must be configured for public read. |
+| `CORS_ALLOW_ORIGIN` | no | — | Defaults to `*`. Safe to leave as-is — `WALFLY_API_TOKEN` is the real access boundary, and CORS only governs what a *browser* enforces client-side. |
+| `LOCAL_AUDIO_DIR` | no | — | Overrides the local audio directory. Default: `<cwd>/.data/audio`. Ignored in S3 mode. |
+| `MAX_UPLOAD_BYTES` | no | — | Overrides the upload-size guard (default 100 MB). Align it with a fronting reverse proxy's own body-size limit if one exists. |
 
 ### `apps/mobile/.env` (copy from `apps/mobile/.env.example`)
 
@@ -160,7 +162,108 @@ bites on the first release build. iOS permits it via Expo's default `NSAllowsArb
 
 ---
 
-## 4. How a recording flows
+## 4. Deployment
+
+Walfly is Docker-first and host-agnostic — nothing here is locked to one platform. Two
+genuinely different paths exist, because "hostable anywhere" splits into two cases that
+need different answers for TLS and object storage:
+
+| | Own a box (VPS, homelab) | Managed platform (Render / Fly / DigitalOcean) |
+|---|---|---|
+| **TLS** | Nobody gives you this for free — something has to terminate it | The platform terminates it for you, free, on a `*.onrender.com` / `*.fly.dev` / `*.ondigitalocean.app` subdomain |
+| **Object storage** | Bundled, self-hosted (Garage), zero accounts | Bring your own S3-compatible bucket (R2's free tier is the easiest fit) — or Fly's own `fly storage create` |
+| **One-step path** | `./deploy.sh` | Render: one click. Fly/DigitalOcean: a short one-time runbook |
+
+### Own box: `./deploy.sh`
+
+```bash
+./deploy.sh
+```
+
+Generates every secret the app needs, stands up self-hosted S3-compatible storage
+(Garage — see `garage.toml.example`'s comment on why not MinIO) and Caddy in front of
+everything for automatic HTTPS (once you have a domain) or plain HTTP (before you do),
+then builds and starts the full stack: **`api`**, **`sidecar`**, **`garage`**, **`caddy`**.
+Prompts once for the handful of external credentials nothing can auto-generate — your
+Astra DB endpoint/token and your LLM proxy key — then prints the generated API token and
+the URLs to use. Safe to re-run; every value already in `.env` is left untouched. Running
+`docker compose up --build` directly also works once `.env` exists.
+
+Verified end-to-end while building this: the full stack reaches healthy, the auth gate
+401s/200s correctly through Caddy, and a real object written via the S3 API is readable
+through the public `/media` route (including `Range` requests, for audio scrubbing).
+
+To use real AWS S3 / Cloudflare R2 / Backblaze B2 instead of the bundled Garage: remove
+the `garage` service from `docker-compose.yml` and point the `S3_*` vars at that
+provider instead (see `docker-compose.env.example`).
+
+### Managed platform: Render (one click)
+
+In the Render dashboard: **New → Blueprint**, pick this repo. `render.yaml` at the repo
+root defines both services together; Render creates them with free HTTPS subdomains and
+prompts you once, during creation, for Astra, your LLM key, and an S3-compatible bucket's
+credentials (Render has no bundled object storage — R2's free tier is the easiest fit).
+`WALFLY_API_TOKEN` and `WALFLY_WS_SECRET` are generated and shared between the two
+services automatically; nothing to copy by hand.
+
+### Managed platform: Fly.io
+
+Not a single command — Fly deploys each Dockerfile as its own app, so the API
+(`packages/api/fly.toml`) and the sidecar (`packages/api/sidecar/fly.toml`) are two
+separate `fly deploy` runs. The full runbook (`fly apps create`, `fly storage create` for
+a free Tigris S3-compatible bucket, `fly secrets set`, `fly deploy`) is in the comment
+block at the top of `packages/api/fly.toml`.
+
+### Managed platform: DigitalOcean App Platform
+
+```bash
+doctl apps create --spec digitalocean-app.yaml
+```
+
+One command provisions both services as one "app". DO has no auto-generated-secret
+feature (unlike Render) and its assigned subdomains include a random suffix not knowable
+ahead of time, so `digitalocean-app.yaml` needs its `REPLACE_ME` placeholders filled in
+by hand first, and `SIDECAR_WS_URL` filled in *after* the first deploy once you can see
+the sidecar's assigned URL — both called out in that file's own comments.
+
+### The one non-obvious trap, if you're configuring any of this by hand: `SIDECAR_WS_URL`
+
+`mintWsTicket()` (`packages/api/lib/wsTicket.ts`) hands the client a WebSocket URL to open
+**directly** — it is not proxied through the API. A Docker-internal address like
+`ws://sidecar:8888/v1/stream` only resolves *between containers*; the end user's device is
+never on that network. It must be the sidecar's real public `wss://` address. Get this
+wrong and every HTTP call still works fine while live streaming silently fails to
+connect — easy to not notice until someone actually tries to record. `deploy.sh` and
+`render.yaml` compute this correctly by construction; it's only a manual-configuration
+risk on Fly/DigitalOcean or if you edit `docker-compose.env.example` by hand.
+
+### Self-hosting without Docker
+
+Each service also runs as a plain process:
+
+```bash
+npm run build --workspace=packages/api && npm run start --workspace=packages/api
+uv run --project packages/api/sidecar python packages/api/sidecar/transcribe_sidecar.py
+```
+
+### Shipping the iOS app against a deployed API
+
+`EXPO_PUBLIC_API_URL` is inlined into the JS bundle at build time, read from whatever
+`apps/mobile/.env` contains when Xcode's "Bundle React Native code" phase runs. Before
+archiving a Release build:
+
+```bash
+cp apps/mobile/.env.production apps/mobile/.env   # fill in the real HTTPS URL first
+```
+
+Restore the dev value in `apps/mobile/.env` afterward. Signing is otherwise unchanged —
+the project already has `DEVELOPMENT_TEAM` set in Xcode for Automatic signing; the only
+requirement is that the machine archiving it has an Apple ID signed in with access to
+that team.
+
+---
+
+## 5. How a recording flows
 
 **Live (the record button) — streaming:**
 
@@ -179,7 +282,7 @@ bites on the first release build. iOS permits it via Expo's default `NSAllowsArb
 
 ---
 
-## 5. Troubleshooting
+## 6. Troubleshooting
 
 ### Setup and connectivity
 
@@ -192,7 +295,9 @@ bites on the first release build. iOS permits it via Expo's default `NSAllowsArb
 | `Missing DOCLING_SERVICE_URL` / `Missing DOCLING_API_KEY` | Transcription is unconfigured. | Set both, then run the smoke test. |
 | `EXPO_PUBLIC_API_URL is not set…` (thrown on native at first request) | Running on a device/emulator without a base URL. | Set `EXPO_PUBLIC_API_URL` in `apps/mobile/.env` to your LAN IP (or `10.0.2.2` on the Android emulator) and restart Expo. |
 | `…cannot reach the API at <url>. Check that the Next.js server is running and that EXPO_PUBLIC_API_URL points at it.` | The fetch never reached a server: wrong host, server down, firewall, or (on release Android) blocked cleartext. | Curl the URL from another machine on the same network. For a release Android build see the `expo-build-properties` note above. |
-| `BLOB_READ_WRITE_TOKEN is required when deployed to Vercel (the filesystem is read-only and per-instance).` | Deployed without Blob storage. | Attach a Blob store in the Vercel dashboard and redeploy. |
+| `{"error":"Unauthorized"}` (HTTP 401) | `WALFLY_API_TOKEN` is missing or wrong on the client. | Enter the correct token (the first-launch prompt on mobile, or an `Authorization: Bearer <token>` header manually). |
+| `Server misconfigured: WALFLY_API_TOKEN is not set` (HTTP 500) | The API itself has no `WALFLY_API_TOKEN` configured — it fails closed rather than silently allowing every request. | Set `WALFLY_API_TOKEN` on the API host and restart it. |
+| `S3_BUCKET is set but S3_ACCESS_KEY_ID / S3_SECRET_ACCESS_KEY are missing.` | S3-compatible storage is half-configured. | Set all of `S3_BUCKET`, `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY`, and `S3_PUBLIC_BASE_URL` together. |
 
 ### Recording and upload (client-side)
 
@@ -203,7 +308,7 @@ bites on the first release build. iOS permits it via Expo's default `NSAllowsArb
 | `This browser cannot encode M4A or Ogg audio, and the transcription service cannot read WebM. Firefox (Ogg/Opus) and Safari (M4A) both work…` | The browser only offers WebM. Docling routes WebM to its **video** pipeline, so it can never reach ASR, and relabelling the MIME type transcodes nothing. | Use Firefox or Safari, or record on the native app. |
 | `WebM/Matroska is a video container…` (HTTP 415 from upload) | Same thing, caught server-side from the magic bytes. | As above. |
 | `Unrecognised audio container. Expected WAV, MP3, M4A/AAC-in-MP4, AAC, OGG or FLAC.` (415) | The uploaded bytes are not an audio container the ASR pipeline accepts. | Check what the client actually produced; the bytes are authoritative, not the filename. |
-| `This N-minute recording is X MB, over the 4.0 MB upload limit.` / HTTP 413 `Audio exceeds the 4 MB upload limit` | Vercel rejects request bodies above ~4.5 MB at the routing layer. At 32 kbps that is ≈16 minutes. | Record shorter walks. Longer recordings need client-direct Blob upload, which is a documented follow-up. |
+| HTTP 413 `Audio exceeds the N MB upload limit` | Hit the `maxUploadBytes()` guard (default 100 MB; override with `MAX_UPLOAD_BYTES`). | Record a shorter walk, or raise `MAX_UPLOAD_BYTES` (and any fronting reverse proxy's own body-size limit) if that's not actually the ceiling you want. |
 | `The recording is empty — no audio was captured.` | Stopped before any frames landed, or the input device produced nothing. | Record for at least a second and check the microphone selection. |
 | `Recording could not be finalised: …` | `stopAndUnloadAsync()` rejected. | Usually transient; try again. The recorder is always released, so the next attempt is not blocked. |
 
@@ -233,7 +338,7 @@ bites on the first release build. iOS permits it via Expo's default `NSAllowsArb
 
 ---
 
-## 6. Building
+## 7. Building
 
 ```bash
 npx tsc --noEmit -p packages/db/tsconfig.json    # db typecheck
@@ -247,9 +352,8 @@ npm run build:mobile                             # expo export -p web
 
 ---
 
-## 7. Known limits
+## 8. Known limits
 
-* **Upload cap 4 MB / 15 minutes.** Client-direct Vercel Blob upload is an explicit non-goal for now: it is unverified on Expo native and its `onUploadCompleted` webhook never fires on localhost.
-* **No server-side reaper.** A job only advances while a client is ticking it. Vercel Queues or a cron reaper is the upgrade; the resumable state machine is the prerequisite and is already in place.
+* **No server-side reaper.** A job only advances while a client is ticking it. A cron reaper is the upgrade; the resumable state machine is the prerequisite and is already in place.
 * **`sort: { createdAt: -1 }` is an in-memory Astra sort** and hard-errors past ~10,000 scanned documents. Keyset pagination is the documented upgrade.
-* **No auth.** Single-user MVP. `CORS_ALLOW_ORIGIN=*` must become an explicit origin the moment that changes.
+* **Single shared token, not per-user accounts.** `WALFLY_API_TOKEN` (§1, §4) gates the API but everyone who has it sees everyone else's recordings. Fine for single-user self-hosting; real multi-user isolation would need actual accounts.

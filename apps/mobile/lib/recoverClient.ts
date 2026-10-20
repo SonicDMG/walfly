@@ -13,8 +13,7 @@
  */
 
 import { Platform } from 'react-native';
-import { uploadRecoveryBlob } from './blobUpload';
-import { apiUrl } from './api';
+import { apiFetch, apiUrl } from './api';
 import type { LocalBuffer, LocalBufferFile } from './localBuffer';
 
 export type TranscriptSource = 'stream' | 'batch';
@@ -29,9 +28,9 @@ interface RecoverStateResponse {
   id: string;
   needed: boolean;
   reason: string;
-  mode: 'blob' | 'local';
+  mode: 's3' | 'local';
   pathname: string;
-  uploadUrl: string | null;
+  uploadUrl: string;
   object: { url: string; bytes: number; sizeMatches: boolean | null } | null;
 }
 
@@ -49,7 +48,7 @@ export interface DeliverInput {
 export async function deliverLocalBuffer(input: DeliverInput): Promise<DeliverResult> {
   const { recordingId } = input;
   try {
-    const probeRes = await fetch(
+    const probeRes = await apiFetch(
       apiUrl(`/api/recordings/${encodeURIComponent(recordingId)}/recover?bytes=${input.file.bytes}&ext=${input.file.ext}`),
     );
     if (!probeRes.ok) {
@@ -60,21 +59,10 @@ export async function deliverLocalBuffer(input: DeliverInput): Promise<DeliverRe
     if (!state.needed) return { status: 'skipped' };
 
     if (state.object?.sizeMatches !== true) {
-      if (state.mode === 'blob') {
-        if (!state.uploadUrl) return { status: 'retry', error: 'server did not provide an upload url' };
-        const blob = await input.buffer.getBlob();
-        if (!blob) return { status: 'retry', error: 'local buffer is not readable for upload' };
-        await uploadRecoveryBlob({
-          handleUploadUrl: apiUrl(state.uploadUrl),
-          pathname: state.pathname,
-          blob,
-        });
-      } else {
-        await uploadWholeFileLocal(recordingId, input.buffer, input.file);
-      }
+      await uploadRecoveredAudio(recordingId, input.buffer, input.file);
     }
 
-    const completeRes = await fetch(
+    const completeRes = await apiFetch(
       apiUrl(`/api/recordings/${encodeURIComponent(recordingId)}/recover/complete`),
       {
         method: 'POST',
@@ -113,8 +101,8 @@ export async function deliverLocalBuffer(input: DeliverInput): Promise<DeliverRe
   }
 }
 
-/** Local/self-hosted mode: one whole-file POST (the dev server has no 4 MB cap). */
-async function uploadWholeFileLocal(
+/** One whole-file POST — the API has no request-body cap in any storage mode. */
+async function uploadRecoveredAudio(
   recordingId: string,
   buffer: LocalBuffer,
   file: LocalBufferFile,
@@ -131,7 +119,7 @@ async function uploadWholeFileLocal(
   }
   form.append('duration', String(file.durationSec));
 
-  const res = await fetch(apiUrl(`/api/recordings/${encodeURIComponent(recordingId)}/recover/audio`), {
+  const res = await apiFetch(apiUrl(`/api/recordings/${encodeURIComponent(recordingId)}/recover/audio`), {
     method: 'POST',
     body: form,
   });

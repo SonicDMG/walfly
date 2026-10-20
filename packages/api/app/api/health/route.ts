@@ -25,7 +25,7 @@ interface HealthResponse {
     collection: 'ok' | 'missing' | 'unknown';
     docling: 'configured' | 'missing';
     llm: 'configured' | 'missing';
-    storage: 'blob' | 'local';
+    storage: 's3' | 'local';
   };
   hybridSearch: boolean;
   detail: string | null;
@@ -70,12 +70,6 @@ export async function GET() {
   const llm = isLlmConfigured() ? 'configured' : 'missing';
 
   const storage = storageMode();
-  if (storage === 'local' && process.env.VERCEL) {
-    // Uploads hard-error in this combination; surface it before a user hits it.
-    detail =
-      detail ??
-      'BLOB_READ_WRITE_TOKEN is required when deployed to Vercel (the filesystem is read-only and per-instance).';
-  }
 
   const body: HealthResponse = {
     status:

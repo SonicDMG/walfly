@@ -1,0 +1,84 @@
+# Render Blueprint — genuinely one-click for people who'd rather not run a
+# VPS: in the Render dashboard, New > Blueprint > pick this repo. Render
+# reads this file and creates both services together, each with a free
+# https://<service>.onrender.com subdomain — TLS included, no DNS or cert
+# work, unlike the self-hosted path (docker-compose.yml + deploy.sh) this
+# repo also ships for VPS/homelab hosting.
+#
+# You'll be prompted once, during blueprint creation, for the handful of
+# values below marked `sync: false` — real external credentials nothing can
+# auto-generate (Astra DB, your LLM proxy key, and an S3-compatible bucket —
+# Render has no bundled object storage, so bring your own; Cloudflare R2's
+# free tier is the easiest fit). Everything else — WALFLY_API_TOKEN,
+# WALFLY_WS_SECRET, and the URL each service needs to reach the other — is
+# generated and wired automatically.
+#
+# See SETUP.md's Deployment section.
+
+services:
+  - type: web
+    name: walfly-api
+    runtime: docker
+    plan: starter
+    dockerfilePath: packages/api/Dockerfile
+    dockerContext: .
+    healthCheckPath: /api/health
+    envVars:
+      - key: WALFLY_API_TOKEN
+        generateValue: true
+      - key: WALFLY_WS_SECRET
+        generateValue: true
+      # Render service names are predictable ahead of time, so these don't
+      # need a manual step the way the self-hosted SIDECAR_WS_URL trap does.
+      - key: SIDECAR_URL
+        value: https://walfly-asr.onrender.com
+      - key: SIDECAR_WS_URL
+        value: wss://walfly-asr.onrender.com/v1/stream
+      - key: ASTRA_DB_API_ENDPOINT
+        sync: false
+      - key: ASTRA_DB_APPLICATION_TOKEN
+        sync: false
+      - key: LLM_BASE_URL
+        value: https://openrouter.ai/api/v1
+      - key: LLM_API_KEY
+        sync: false
+      - key: LLM_MODEL
+        value: openai/gpt-oss-20b
+      # S3-compatible bucket (e.g. Cloudflare R2) — Render has no bundled
+      # object storage, unlike the self-hosted path's bundled Garage.
+      - key: S3_ENDPOINT
+        sync: false
+      - key: S3_REGION
+        value: auto
+      - key: S3_BUCKET
+        sync: false
+      - key: S3_ACCESS_KEY_ID
+        sync: false
+      - key: S3_SECRET_ACCESS_KEY
+        sync: false
+      - key: S3_PUBLIC_BASE_URL
+        sync: false
+      - key: CORS_ALLOW_ORIGIN
+        value: "*"
+
+  - type: web
+    name: walfly-asr
+    runtime: docker
+    plan: standard
+    dockerfilePath: packages/api/sidecar/Dockerfile
+    dockerContext: .
+    healthCheckPath: /health
+    envVars:
+      # Pulled from walfly-api's generated value — never typed twice, never
+      # drifts out of sync between the two services.
+      - key: WALFLY_WS_SECRET
+        fromService:
+          name: walfly-api
+          type: web
+          envVarKey: WALFLY_WS_SECRET
+      - key: ASR_WORKERS
+        value: "2"
+      - key: ASR_CPU_THREADS
+        value: "2"
+      - key: PYTHONUNBUFFERED
+        value: "1"

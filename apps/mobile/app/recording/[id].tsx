@@ -29,6 +29,7 @@ import { AudioModule, createAudioPlayer, setAudioModeAsync, type AudioStatus } f
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import {
+  apiFetch,
   apiUrl,
   describeRequestError,
   isNonTerminal,
@@ -84,7 +85,7 @@ export default function RecordingDetailScreen() {
     if (!safeId) return;
     if (!silent) setLoading(true);
     try {
-      const res = await fetch(apiUrl(`/api/recordings/${safeId}`));
+      const res = await apiFetch(apiUrl(`/api/recordings/${safeId}`));
       if (res.status === 404) {
         if (mountedRef.current) setLoadError({ kind: 'notFound' });
         return;
@@ -122,7 +123,7 @@ export default function RecordingDetailScreen() {
 
     void (async () => {
       try {
-        const res = await fetch(apiUrl(`/api/recordings/${safeId}/process`), { method: 'POST' });
+        const res = await apiFetch(apiUrl(`/api/recordings/${safeId}/process`), { method: 'POST' });
         if (cancelled || !res.ok) return;
         const result = (await res.json()) as ProcessResponse;
         if (cancelled) return;
@@ -149,7 +150,7 @@ export default function RecordingDetailScreen() {
     if (!safeId) return;
     setSaving(true);
     try {
-      const res = await fetch(apiUrl(`/api/recordings/${safeId}`), {
+      const res = await apiFetch(apiUrl(`/api/recordings/${safeId}`), {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(fields),
@@ -185,7 +186,7 @@ export default function RecordingDetailScreen() {
     if (!confirmed) return;
 
     try {
-      const res = await fetch(apiUrl(`/api/recordings/${safeId}`), { method: 'DELETE' });
+      const res = await apiFetch(apiUrl(`/api/recordings/${safeId}`), { method: 'DELETE' });
       if (!res.ok) throw new Error(`Delete failed (HTTP ${res.status})`);
       goBackToMoments();
     } catch (err) {

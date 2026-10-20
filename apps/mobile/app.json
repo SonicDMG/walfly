@@ -11,7 +11,8 @@
     ],
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "com.walfly.app"
+      "bundleIdentifier": "com.walfly.app",
+      "buildNumber": "1"
     },
     "android": {
       "adaptiveIcon": {
@@ -59,7 +60,8 @@
       ],
       "expo-status-bar",
       "expo-web-browser",
-      "expo-audio"
+      "expo-audio",
+      "expo-secure-store"
     ],
     "scheme": "walfly"
   }

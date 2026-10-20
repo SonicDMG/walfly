@@ -1,0 +1,31 @@
+# Single front door for the whole stack. CADDY_ADDRESS is set by deploy.sh
+# (or docker-compose.yml's default) — a real domain gets automatic HTTPS from
+# Let's Encrypt for free; ":80" serves plain HTTP for a bare-IP/no-domain-yet
+# deployment. Nothing else in this file changes between those two cases.
+{$CADDY_ADDRESS} {
+	# The sidecar's WebSocket endpoint — mintWsTicket() hands clients this exact
+	# path, so it must stay in sync with SIDECAR_WS_URL in .env (deploy.sh keeps
+	# them consistent). Caddy upgrades the WebSocket automatically.
+	@sidecar path /v1/*
+	handle @sidecar {
+		reverse_proxy sidecar:8888
+	}
+
+	# Public object storage reads. Garage's anonymous-read feature is
+	# Host-header-routed (bucketname.web.<root_domain>), not path-based, so
+	# this strips /media and rewrites the Host Garage expects — verified
+	# against a real Garage container, including Range requests for audio
+	# scrubbing. S3_PUBLIC_BASE_URL in .env points here.
+	@media path /media/*
+	handle @media {
+		uri strip_prefix /media
+		reverse_proxy garage:3902 {
+			header_up Host {$GARAGE_WEBSITE_HOST}
+		}
+	}
+
+	# Everything else — all /api/* routes and any app pages — goes to the API.
+	handle {
+		reverse_proxy api:3000
+	}
+}

@@ -2,7 +2,8 @@ import { useEffect } from 'react';
 import { Stack } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
 import * as SplashScreen from 'expo-splash-screen';
-import { apiUrl } from '../lib/api';
+import { ApiTokenGate } from '../components/ApiTokenGate';
+import { apiFetch, apiUrl } from '../lib/api';
 import {
   useFonts,
   PlayfairDisplay_600SemiBold,
@@ -28,7 +29,7 @@ export default function RootLayout() {
   useEffect(() => {
     // Preflight warm-up ping: wake up hibernating Astra DB in background immediately on app launch
     try {
-      void fetch(apiUrl('/api/health')).catch(() => {
+      void apiFetch(apiUrl('/api/health')).catch(() => {
         // Fire-and-forget; failure is handled on active screen queries
       });
     } catch {
@@ -43,7 +44,7 @@ export default function RootLayout() {
   if (!fontsLoaded) return null;
 
   return (
-    <>
+    <ApiTokenGate>
       <Stack screenOptions={{ headerShown: false }}>
         <Stack.Screen name="(tabs)" />
         <Stack.Screen name="recording/[id]" options={{ presentation: 'card' }} />
@@ -51,6 +52,6 @@ export default function RootLayout() {
         <Stack.Screen name="+not-found" />
       </Stack>
       <StatusBar style="light" />
-    </>
+    </ApiTokenGate>
   );
 }

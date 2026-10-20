@@ -42,11 +42,11 @@ export interface RecoverState {
   needed: boolean;
   reason: RecoverReason;
   status: string | null;
-  mode: 'blob' | 'local';
+  mode: 's3' | 'local';
   pathname: string;
   contentType: string;
-  /** Present in blob mode only; the client POSTs the SDK body here. */
-  uploadUrl: string | null;
+  /** Where the client POSTs the whole-file body — the same path in every mode. */
+  uploadUrl: string;
   maxBytes: number;
   object: RecoverObjectState | null;
   transcriptSource: TranscriptSource | null;
@@ -67,7 +67,7 @@ export async function getRecoverState(id: string, input: RecoverStateInput = {})
     mode,
     pathname,
     contentType: contentTypeForExtension(ext),
-    uploadUrl: mode === 'blob' ? `/api/recordings/${encodeURIComponent(id)}/recover/upload` : null,
+    uploadUrl: `/api/recordings/${encodeURIComponent(id)}/recover/audio`,
     maxBytes: RECOVER_MAX_BYTES,
     retryAfterMs: 0,
   } as const;

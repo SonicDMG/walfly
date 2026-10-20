@@ -1,0 +1,27 @@
+# Applies to every `docker build` run from the repo root (the API and the
+# sidecar Dockerfiles both use `context: .`). Must NOT exclude any package.json
+# the Dockerfiles explicitly COPY (apps/mobile/package.json included — the API
+# image's deps stage needs it to resolve the npm workspace graph).
+
+node_modules
+**/.next
+**/.data
+.env
+.env.*
+**/.env
+**/.env.*
+.git
+
+# Native build output and heavy local-only dirs, never referenced by either
+# Dockerfile — excluded purely to keep the build context small.
+apps/mobile/ios
+apps/mobile/android
+apps/mobile/.expo
+apps/mobile/web-build
+ios/
+packages/api/sidecar/.venv
+packages/api/sidecar/tests
+.archify
+.devin
+research_notes
+*.log

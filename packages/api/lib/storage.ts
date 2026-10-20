@@ -5,32 +5,39 @@
  * transcription: our server always uploads the bytes to Docling as multipart,
  * so Docling never has to reach this URL.
  *
- *   BLOB_READ_WRITE_TOKEN set   → Vercel Blob, absolute https URL
- *   unset, running locally      → packages/api/.data/audio, served by
- *                                 /api/recordings/audio/<name>
- *   unset, running on Vercel    → hard error; the filesystem there is
- *                                 read-only and per-instance, so a silent
- *                                 fallback would lose every recording.
+ *   S3_BUCKET set   → S3-compatible object storage (AWS S3 / Cloudflare R2 /
+ *                      Backblaze B2 / MinIO), public-read bucket, absolute
+ *                      https URL. The required backend for any host without a
+ *                      guaranteed-persistent, single-instance filesystem.
+ *   unset           → packages/api/.data/audio, served by
+ *                      /api/recordings/audio/<name>. Local-dev convenience
+ *                      only — not recommended in production, since an
+ *                      ephemeral or multi-instance container loses it.
  *
  * loadAudio() resolves either URL form back to bytes, which is what makes the
- * pipeline identical in `next dev` and in production.
+ * pipeline identical in every mode.
  */
 
-import { del, head, put } from '@vercel/blob';
+import {
+  DeleteObjectCommand,
+  HeadObjectCommand,
+  PutObjectCommand,
+  S3Client,
+} from '@aws-sdk/client-s3';
 import { mkdir, readFile, stat, unlink, writeFile } from 'fs/promises';
 import { resolve, sep } from 'path';
 
 export const LOCAL_AUDIO_URL_PREFIX = '/api/recordings/audio/';
 
 /**
- * Every outbound call in this codebase is bounded. A Blob download that accepts
+ * Every outbound call in this codebase is bounded. A download that accepts
  * the connection and then stalls would otherwise hold the /process invocation
  * open until the platform kills it, so the pipeline never gets to record the
  * failure and never gets to retry.
  */
 const REMOTE_FETCH_TIMEOUT_MS = 60_000;
 
-export type StorageMode = 'blob' | 'local';
+export type StorageMode = 's3' | 'local';
 
 export interface StoredAudio {
   url: string;
@@ -55,14 +62,14 @@ const EXTENSION_CONTENT_TYPES: Record<string, string> = {
 const SAFE_NAME = /^[A-Za-z0-9._-]+$/;
 
 export function storageMode(): StorageMode {
-  return process.env.BLOB_READ_WRITE_TOKEN ? 'blob' : 'local';
+  return process.env.S3_BUCKET ? 's3' : 'local';
 }
 
 export function contentTypeForExtension(ext: string): string {
   return EXTENSION_CONTENT_TYPES[ext.replace(/^\./, '').toLowerCase()] ?? 'application/octet-stream';
 }
 
-/** Absolute directory holding locally stored audio. Never used in blob mode. */
+/** Absolute directory holding locally stored audio. Never used in s3 mode. */
 export function localAudioDir(): string {
   return process.env.LOCAL_AUDIO_DIR
     ? resolve(process.env.LOCAL_AUDIO_DIR)
@@ -82,6 +89,62 @@ export function localAudioPath(name: string): string | null {
   return path;
 }
 
+let cachedS3Client: S3Client | undefined;
+
+/** Lazily constructed so a local-mode deployment never needs S3 credentials. */
+function s3Client(): S3Client {
+  if (cachedS3Client) return cachedS3Client;
+
+  const accessKeyId = process.env.S3_ACCESS_KEY_ID;
+  const secretAccessKey = process.env.S3_SECRET_ACCESS_KEY;
+  if (!accessKeyId || !secretAccessKey) {
+    throw new Error(
+      'S3_BUCKET is set but S3_ACCESS_KEY_ID / S3_SECRET_ACCESS_KEY are missing.',
+    );
+  }
+
+  const endpoint = process.env.S3_ENDPOINT?.trim();
+  cachedS3Client = new S3Client({
+    region: process.env.S3_REGION?.trim() || 'auto',
+    credentials: { accessKeyId, secretAccessKey },
+    // Path-style addressing is what R2/MinIO/B2 expect behind a custom endpoint;
+    // real AWS S3 (no S3_ENDPOINT set) uses its normal virtual-hosted routing.
+    ...(endpoint ? { endpoint, forcePathStyle: true } : {}),
+  });
+  return cachedS3Client;
+}
+
+function s3Bucket(): string {
+  const bucket = process.env.S3_BUCKET;
+  if (!bucket) throw new Error('S3_BUCKET is not configured');
+  return bucket;
+}
+
+/**
+ * S3-compatible `PutObject` responses don't reliably hand back a usable public
+ * URL the way Vercel Blob's `put()` did, so the API constructs it itself. The
+ * bucket must be configured for public read (bucket policy / public-access
+ * toggle) — this app never signs or re-signs URLs.
+ */
+function s3PublicUrl(key: string): string {
+  const base = process.env.S3_PUBLIC_BASE_URL?.trim().replace(/\/+$/, '');
+  if (!base) {
+    throw new Error(
+      'S3_PUBLIC_BASE_URL is not configured — set it to the public-read base the ' +
+        'S3_BUCKET is reachable at (e.g. an R2 .r2.dev / custom domain, a MinIO ' +
+        'public endpoint, or https://<bucket>.s3.<region>.amazonaws.com).',
+    );
+  }
+  return `${base}/${key}`;
+}
+
+/** Strips the public base back off a stored URL to recover the object key. */
+function s3KeyFromPublicUrl(url: string): string | null {
+  const base = process.env.S3_PUBLIC_BASE_URL?.trim().replace(/\/+$/, '');
+  if (base && url.startsWith(`${base}/`)) return url.slice(base.length + 1);
+  return null;
+}
+
 /**
  * Persists the audio. `key` is a logical path such as `recordings/<id>.m4a`;
  * in local mode the separators are flattened so the file stays a safe basename.
@@ -89,22 +152,20 @@ export function localAudioPath(name: string): string | null {
 export async function storeAudio(key: string, bytes: Uint8Array, contentType: string): Promise<StoredAudio> {
   const size = bytes.byteLength;
   const mode = storageMode();
-  console.log(`[${mode === 'blob' ? 'Vercel Blob' : 'local storage'}] storing audio key=${key} size=${size} bytes`);
+  console.log(`[${mode === 's3' ? 'S3' : 'local storage'}] storing audio key=${key} size=${size} bytes`);
 
-  if (process.env.BLOB_READ_WRITE_TOKEN) {
-    const blob = await put(key, Buffer.from(bytes), {
-      access: 'public',
-      contentType,
-      addRandomSuffix: false,
-    });
-    console.log(`[Vercel Blob] stored → ${blob.url}`);
-    return { url: blob.url, contentType, bytes: size };
-  }
-
-  if (process.env.VERCEL) {
-    throw new Error(
-      'BLOB_READ_WRITE_TOKEN is required when deployed to Vercel (the filesystem is read-only and per-instance).',
+  if (mode === 's3') {
+    await s3Client().send(
+      new PutObjectCommand({
+        Bucket: s3Bucket(),
+        Key: key,
+        Body: Buffer.from(bytes),
+        ContentType: contentType,
+      }),
     );
+    const url = s3PublicUrl(key);
+    console.log(`[S3] stored → ${url}`);
+    return { url, contentType, bytes: size };
   }
 
   const name = key.replace(/[^A-Za-z0-9._-]/g, '_');
@@ -131,7 +192,8 @@ export async function loadAudio(audioUrl: string): Promise<{ bytes: Uint8Array; 
     if (!path) throw new Error(`Unsafe local audio URL: ${audioUrl}`);
     // turbopackIgnore: the path is computed at runtime, and without this the
     // bundler traces the entire repository into the deployment output. This
-    // branch only runs off-Vercel anyway; there, storeAudio requires Blob.
+    // branch only runs in local mode anyway; in s3 mode storeAudio never
+    // produces a local-prefixed URL.
     const buffer = await readFile(/* turbopackIgnore: true */ path);
     const result = {
       bytes: new Uint8Array(buffer),
@@ -142,7 +204,7 @@ export async function loadAudio(audioUrl: string): Promise<{ bytes: Uint8Array; 
   }
 
   if (/^https?:\/\//i.test(audioUrl)) {
-    console.log(`[Vercel Blob] loading audio from ${audioUrl}`);
+    console.log(`[S3] loading audio from ${audioUrl}`);
     let res: Response;
     try {
       res = await fetch(audioUrl, { signal: AbortSignal.timeout(REMOTE_FETCH_TIMEOUT_MS) });
@@ -166,7 +228,7 @@ export async function loadAudio(audioUrl: string): Promise<{ bytes: Uint8Array; 
       bytes: new Uint8Array(buffer),
       contentType: res.headers.get('content-type') ?? contentTypeForExtension(extensionOf(audioUrl)),
     };
-    console.log(`[Vercel Blob] loaded (${result.bytes.byteLength} bytes, ${result.contentType})`);
+    console.log(`[S3] loaded (${result.bytes.byteLength} bytes, ${result.contentType})`);
     return result;
   }
 
@@ -180,22 +242,29 @@ export async function loadAudio(audioUrl: string): Promise<{ bytes: Uint8Array; 
  * normal state in that flow.
  */
 export async function statStoredAudio(pathname: string): Promise<StoredAudio | null> {
-  if (process.env.BLOB_READ_WRITE_TOKEN) {
+  if (storageMode() === 's3') {
     try {
-      const blob = await head(pathname, { abortSignal: AbortSignal.timeout(REMOTE_FETCH_TIMEOUT_MS) });
-      return { url: blob.url, contentType: blob.contentType, bytes: blob.size };
+      const head = await s3Client().send(
+        new HeadObjectCommand({ Bucket: s3Bucket(), Key: pathname }),
+      );
+      return {
+        url: s3PublicUrl(pathname),
+        contentType: head.ContentType ?? contentTypeForExtension(extensionOf(pathname)),
+        bytes: head.ContentLength ?? 0,
+      };
     } catch (err) {
-      console.log(`[Vercel Blob] head(${pathname}) → missing (${err instanceof Error ? err.message : err})`);
+      console.log(`[S3] head(${pathname}) → missing (${err instanceof Error ? err.message : err})`);
       return null;
     }
   }
-  if (process.env.VERCEL) return null;
 
   const name = pathname.replace(/[^A-Za-z0-9._-]/g, '_');
   const path = localAudioPath(name);
   if (!path) return null;
   try {
-    const info = await stat(path);
+    // turbopackIgnore: see the matching comment in loadAudio — the path is
+    // computed at runtime and local mode never runs in the Docker image.
+    const info = await stat(/* turbopackIgnore: true */ path);
     return {
       url: `${LOCAL_AUDIO_URL_PREFIX}${encodeURIComponent(name)}`,
       contentType: contentTypeForExtension(extensionOf(name)),
@@ -208,11 +277,11 @@ export async function statStoredAudio(pathname: string): Promise<StoredAudio | n
 
 /** Deletes a stored object by pathname — e.g. the loser of a duplicate delivery. */
 export async function deleteStoredAudio(pathname: string): Promise<void> {
-  if (process.env.BLOB_READ_WRITE_TOKEN) {
+  if (storageMode() === 's3') {
     try {
-      await del(pathname, { abortSignal: AbortSignal.timeout(REMOTE_FETCH_TIMEOUT_MS) });
+      await s3Client().send(new DeleteObjectCommand({ Bucket: s3Bucket(), Key: pathname }));
     } catch (err) {
-      console.warn(`[Vercel Blob] deleteStoredAudio(${pathname}) failed:`, err);
+      console.warn(`[S3] deleteStoredAudio(${pathname}) failed:`, err);
     }
     return;
   }
@@ -224,7 +293,7 @@ export async function deleteStoredAudio(pathname: string): Promise<void> {
   });
 }
 
-/** Removes the stored object. Handles both the Blob and the local-file case. */
+/** Removes the stored object. Handles both the s3 and the local-file case. */
 export async function deleteAudio(audioUrl: string): Promise<void> {
   if (audioUrl.startsWith(LOCAL_AUDIO_URL_PREFIX)) {
     console.log(`[local storage] deleting audio at ${audioUrl}`);
@@ -239,10 +308,15 @@ export async function deleteAudio(audioUrl: string): Promise<void> {
   }
 
   if (/^https?:\/\//i.test(audioUrl)) {
-    console.log(`[Vercel Blob] deleting audio at ${audioUrl}`);
-    if (!process.env.BLOB_READ_WRITE_TOKEN) return;
-    await del(audioUrl, { abortSignal: AbortSignal.timeout(REMOTE_FETCH_TIMEOUT_MS) });
-    console.log(`[Vercel Blob] deleted object`);
+    console.log(`[S3] deleting audio at ${audioUrl}`);
+    if (storageMode() !== 's3') return;
+    const key = s3KeyFromPublicUrl(audioUrl);
+    if (!key) {
+      console.warn(`[S3] deleteAudio: could not derive an object key from ${audioUrl}`);
+      return;
+    }
+    await s3Client().send(new DeleteObjectCommand({ Bucket: s3Bucket(), Key: key }));
+    console.log(`[S3] deleted object`);
   }
 }
 

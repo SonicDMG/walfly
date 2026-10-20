@@ -1,0 +1,37 @@
+# Reference only — ./deploy.sh generates the real garage.toml (gitignored,
+# with a freshly generated rpc_secret) automatically. Copy this by hand only
+# if you're configuring without deploy.sh.
+#
+# Garage is the self-hosted S3-compatible storage backend bundled in
+# docker-compose.yml (MinIO's images were pulled from Docker Hub/quay.io in
+# September 2026 after the project was archived — see SETUP.md). Single-node
+# mode (`--single-node --default-bucket` in docker-compose.yml's command)
+# auto-creates the access key and bucket from GARAGE_DEFAULT_* in .env.
+
+metadata_dir = "/data/meta"
+data_dir = "/data/data"
+db_engine = "sqlite"
+
+replication_factor = 1
+
+rpc_bind_addr = "[::]:3901"
+rpc_public_addr = "127.0.0.1:3901"
+# 32 bytes of hex — openssl rand -hex 32. Only ever used for this single
+# container to talk to itself; not reachable outside the Docker network.
+rpc_secret = "REPLACE_ME_WITH_openssl_rand_-hex_32"
+
+[s3_api]
+# Must match S3_REGION in .env.
+s3_region = "garage"
+api_bind_addr = "[::]:3900"
+root_domain = ".s3.garage.internal"
+
+[s3_web]
+# Anonymous reads go through here (Host-header-routed), not the S3 API —
+# see the Caddyfile's /media route and SETUP.md's Deployment section.
+bind_addr = "[::]:3902"
+root_domain = ".web.garage.internal"
+index = "index.html"
+
+[admin]
+api_bind_addr = "[::]:3903"

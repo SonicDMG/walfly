@@ -93,7 +93,7 @@ RAG-grounded streaming chat across all your moments.
 
 Every finalized segment is checkpointed to [Astra DB](https://astra.datastax.com) before being acknowledged to the sidecar. If the connection drops, the sidecar replays unacknowledged segments. If the app dies, a local OPFS buffer delivers the full recording on the next launch. **Nothing you say is lost.**
 
-> **Deployment status:** walfly currently runs locally (`npm run dev`). The API is written to be Vercel-compatible and the sidecar ships a `fly.toml`, but neither has been deployed yet.
+> **Deployment status:** walfly is Docker-first and host-agnostic. Own a box (VPS, homelab)? `./deploy.sh` is one step — it bundles self-hosted object storage and automatic HTTPS and brings up the whole stack. Prefer a managed platform? Render deploys both services from one Blueprint click; Fly and DigitalOcean manifests are included too. See `SETUP.md`'s "Deployment" section.
 
 ---
 
@@ -102,13 +102,14 @@ Every finalized segment is checkpointed to [Astra DB](https://astra.datastax.com
 | Layer | Technology | Why |
 |---|---|---|
 | **Frontend** | [Expo](https://expo.dev) SDK 57 + [expo-router](https://expo.github.io/router) | One codebase for web, iOS, Android |
-| **API** | [Next.js](https://nextjs.org) 16 App Router (runs locally; Vercel-compatible, not yet deployed) | Serverless-friendly route handlers |
-| **ASR** | [faster-whisper](https://github.com/SYSTRAN/faster-whisper) + [Silero VAD](https://github.com/snakers4/silero-vad) sidecar (runs locally; `fly.toml` included, not yet deployed) | Real-time streaming transcription; LocalAgreement-2 for stable partials |
+| **API** | [Next.js](https://nextjs.org) 16 App Router, Dockerized (`output: 'standalone'`) | Host-agnostic — runs anywhere Docker runs |
+| **ASR** | [faster-whisper](https://github.com/SYSTRAN/faster-whisper) + [Silero VAD](https://github.com/snakers4/silero-vad) sidecar, Dockerized | Real-time streaming transcription; LocalAgreement-2 for stable partials |
 | **Transcription (file)** | [Docling](https://github.com/docling-project/docling) SaaS | Timestamped markdown output; no local Python needed |
 | **Database** | [Astra DB](https://astra.datastax.com) (DataStax) | Vector store + document DB; built-in NVIDIA embeddings |
 | **Vector search** | Hybrid lexical + rerank (AWS `us-east-2`) / vector + RRF (all regions) | Semantic + keyword search across all recordings |
 | **LLM** | OpenAI-compatible proxy ([OpenRouter](https://openrouter.ai) / [LiteLLM](https://github.com/BerriAI/litellm) / [Ollama](https://ollama.com)) | Swap any model without code changes via env vars |
-| **Audio storage** | Local `.data/audio/` (default) / [Vercel Blob](https://vercel.com/docs/storage/vercel-blob) when `BLOB_READ_WRITE_TOKEN` is set | Zero-config local fallback; Blob is opt-in |
+| **Audio storage** | Local `.data/audio/` (dev only) / S3-compatible object storage ([AWS S3](https://aws.amazon.com/s3/) / [Cloudflare R2](https://www.cloudflare.com/developer-platform/products/r2/) / [Backblaze B2](https://www.backblaze.com/cloud-storage) / MinIO) in production | Zero-config local fallback; works identically against any S3-compatible provider |
+| **Auth** | Single shared bearer token (`WALFLY_API_TOKEN`) | Gates every API route except `/health` and `/wiki/*` |
 | **Language** | [TypeScript](https://www.typescriptlang.org) end-to-end | Shared types between API and mobile |
 
 ---
@@ -237,9 +238,14 @@ walfly/
 │   ├── api/                 # Next.js API
 │   │   ├── app/api/         # route handlers
 │   │   ├── lib/             # transcribe · enrich · llm · store
-│   │   └── sidecar/         # Python ASR sidecar (fly.toml included)
+│   │   └── sidecar/         # Python ASR sidecar (Dockerfile + fly.toml)
 │   └── db/                  # Astra DB client, schema, types
-└── research_notes/          # architecture decisions and research
+├── research_notes/          # architecture decisions and research
+├── deploy.sh                # one-step VPS/homelab deploy (see SETUP.md)
+├── docker-compose.yml       # api + sidecar + garage + caddy, for deploy.sh
+├── Caddyfile                # automatic HTTPS / routing, for docker-compose.yml
+├── render.yaml              # one-click Render Blueprint (both services)
+└── digitalocean-app.yaml    # DigitalOcean App Platform spec (both services)
 ```
 
 `apps/mobile` deliberately does **not** import `@walfly/db` — wire types are mirrored in `apps/mobile/lib/types.ts` so [Metro](https://metrobundler.dev) never pulls the [Astra DB](https://astra.datastax.com) driver into the client bundle.
@@ -259,11 +265,11 @@ walfly/
 - [x] Streaming ASR sidecar ([faster-whisper](https://github.com/SYSTRAN/faster-whisper) + [Silero VAD](https://github.com/snakers4/silero-vad))
 - [x] Live captions via WebSocket
 - [x] Crash-safe local buffer with recovery upload
-- [ ] Deploy API to Vercel and sidecar to Fly.io
+- [x] Dockerize the API and sidecar; drop the Vercel-specific storage/upload-cap code paths entirely
+- [x] Shared bearer-token auth across the API and mobile app
 - [ ] Live rolling enrichment (phase 2)
-- [ ] Multi-user auth
+- [ ] Multi-user auth (currently one shared token, not per-user accounts)
 - [ ] Apple Watch companion (ST-9)
-- [ ] Client-direct Vercel Blob upload (removes 4 MB / 15 min cap)
 
 ---
 
