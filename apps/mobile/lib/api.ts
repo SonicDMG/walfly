@@ -45,7 +45,7 @@ export async function setApiToken(token: string | null): Promise<void> {
 /**
  * `fetch` with the shared bearer token attached, if one is set. The one
  * import site every request in this app should go through — the API gates
- * every route except /api/health and /api/wiki/* behind this token.
+ * every route except /api/health behind this token.
  *
  * Accepts an alternate fetch implementation for callers that need one (e.g.
  * `expo/fetch` on native for a real streaming ReadableStream in useChat.ts).

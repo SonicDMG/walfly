@@ -1,7 +1,7 @@
 {
   "repo_notes": [
     {
-      "content": "Walfly is a monorepo with three main packages: (1) apps/mobile — an Expo/React Native app for iOS/Android/web that records audio, streams it live, and lets users chat with their recordings. (2) packages/api — a Next.js 16 app that is the entire backend: REST API routes, LLM chat, audio storage, transcription orchestration, and a /wiki developer Q&A tool. (3) packages/db — a shared TypeScript library wrapping DataStax Astra DB (Cassandra + vector search) used by the API. There is also a Python sidecar at packages/api/sidecar that handles audio transcription via Whisper/Docling and streams results over WebSocket.",
+      "content": "Walfly is a monorepo with three main packages: (1) apps/mobile — an Expo/React Native app for iOS/Android/web that records audio, streams it live, and lets users chat with their recordings. (2) packages/api — a Next.js 16 app that is the entire backend: REST API routes, LLM chat, audio storage, and transcription orchestration. (3) packages/db — a shared TypeScript library wrapping DataStax Astra DB (Cassandra + vector search) used by the API. There is also a Python sidecar at packages/api/sidecar that handles audio transcription via Whisper/Docling and streams results over WebSocket.",
       "author": "walfly team"
     },
     {
@@ -13,7 +13,7 @@
       "author": "walfly team"
     },
     {
-      "content": "LLM usage: all LLM calls go through lib/llm.ts which wraps the OpenAI SDK pointed at any OpenAI-compatible proxy (OpenRouter, LiteLLM, Ollama). Configured entirely via env vars: LLM_BASE_URL, LLM_API_KEY, LLM_MODEL. The chat endpoint (/api/chat) uses Astra vector search to find relevant recordings and streams answers as SSE. The wiki endpoint (/api/wiki/chat) fetches live file contents from GitHub and streams grounded answers about the codebase itself.",
+      "content": "LLM usage: all LLM calls go through lib/llm.ts which wraps the OpenAI SDK pointed at any OpenAI-compatible proxy (OpenRouter, LiteLLM, Ollama). Configured entirely via env vars: LLM_BASE_URL, LLM_API_KEY, LLM_MODEL. The chat endpoint (/api/chat) uses Astra vector search to find relevant recordings and streams answers as SSE.",
       "author": "walfly team"
     },
     {
@@ -38,16 +38,11 @@
     },
     {
       "title": "API Routes",
-      "purpose": "Complete reference for all Next.js API route handlers under packages/api/app/api/. Group by resource: recordings (CRUD, session, upload, finalize, process, recover, segments, ws-ticket, audio), chat, moments/clusters, health, and wiki/chat. Document request/response shapes."
+      "purpose": "Complete reference for all Next.js API route handlers under packages/api/app/api/. Group by resource: recordings (CRUD, session, upload, finalize, process, recover, segments, ws-ticket, audio), chat, moments/clusters, and health. Document request/response shapes."
     },
     {
       "title": "Chat & RAG",
       "purpose": "How the /api/chat endpoint works: Astra vector search to find relevant recordings, context injection strategy (full transcript vs summary-only), the similarity threshold, streaming SSE response format, and the FORMATTING_INSTRUCTIONS prompt.",
-      "parent": "API Routes"
-    },
-    {
-      "title": "Live Codebase Wiki",
-      "purpose": "Document the /wiki developer tool and its /api/wiki/chat backend. Explain the two-stage pipeline: GitHub file tree fetch (60s cache), LLM-based file selection, live raw content fetch, and grounded streaming answer with citations. Cover lib/github.ts helpers.",
       "parent": "API Routes"
     },
     {

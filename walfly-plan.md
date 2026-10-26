@@ -380,7 +380,7 @@ walfly/
 | LLM model swappability | Via env vars LLM_BASE_URL / LLM_API_KEY / LLM_MODEL |
 | Chat scope | Per-recording (from detail screen) + global cross-recording (Tab 3) |
 | Chat RAG | Per-recording: that transcript, truncated. Global: Astra vector search injects titles/summaries/takeaways only |
-| Auth | ~~None for MVP~~ → single shared bearer token (`WALFLY_API_TOKEN`), checked by `packages/api/proxy.ts` on every `/api/*` request except `/api/health` and `/api/wiki/*` |
+| Auth | ~~None for MVP~~ → single shared bearer token (`WALFLY_API_TOKEN`), checked by `packages/api/proxy.ts` on every `/api/*` request except `/api/health` |
 | Search mode | Hybrid (lexical + rerank) where the Astra region supports it, otherwise vector + `searchTokens` fused with RRF |
 | Location | Reverse-geocoded human name + raw coords |
 | Apple Watch | Post-MVP (ST-9) |

@@ -109,7 +109,7 @@ Every finalized segment is checkpointed to [Astra DB](https://astra.datastax.com
 | **Vector search** | Hybrid lexical + rerank (AWS `us-east-2`) / vector + RRF (all regions) | Semantic + keyword search across all recordings |
 | **LLM** | OpenAI-compatible proxy ([OpenRouter](https://openrouter.ai) / [LiteLLM](https://github.com/BerriAI/litellm) / [Ollama](https://ollama.com)) | Swap any model without code changes via env vars |
 | **Audio storage** | Local `.data/audio/` (dev only) / S3-compatible object storage ([AWS S3](https://aws.amazon.com/s3/) / [Cloudflare R2](https://www.cloudflare.com/developer-platform/products/r2/) / [Backblaze B2](https://www.backblaze.com/cloud-storage) / MinIO) in production | Zero-config local fallback; works identically against any S3-compatible provider |
-| **Auth** | Single shared bearer token (`WALFLY_API_TOKEN`) | Gates every API route except `/health` and `/wiki/*` |
+| **Auth** | Single shared bearer token (`WALFLY_API_TOKEN`) | Gates every API route except `/health` |
 | **Language** | [TypeScript](https://www.typescriptlang.org) end-to-end | Shared types between API and mobile |
 
 ---

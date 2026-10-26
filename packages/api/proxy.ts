@@ -2,8 +2,7 @@
  * proxy.ts
  *
  * Gates every /api/* request behind a single shared bearer token
- * (WALFLY_API_TOKEN), except /api/health (operational probe) and /api/wiki/*
- * (public codebase Q&A — no user data behind either). Runs in the Node.js
+ * (WALFLY_API_TOKEN), except /api/health (operational probe). Runs in the Node.js
  * runtime, which is Proxy's default as of Next 16 (this file replaces the
  * deprecated `middleware.ts` convention — same mechanism, renamed).
  *
@@ -18,7 +17,7 @@ import crypto from 'node:crypto';
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 
-const EXEMPT_PREFIXES = ['/api/health', '/api/wiki'];
+const EXEMPT_PREFIXES = ['/api/health'];
 
 /**
  * Mirrors next.config.js's `headers()` CORS block for /api/:path*. Duplicated
