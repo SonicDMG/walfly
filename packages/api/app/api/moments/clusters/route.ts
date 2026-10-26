@@ -11,7 +11,7 @@
  */
 
 import { NextRequest, NextResponse } from 'next/server';
-import { getRecordingsCollection } from '@walfly/db';
+import { getRecordingsV2Collection } from '@walfly/db';
 import { clusterRecordingsWithJev, type ClusteredMomentsResult, PRESET_LENSES } from '@/lib/jev';
 import { isLlmConfigured } from '@/lib/llm';
 
@@ -35,7 +35,7 @@ export async function GET(req: NextRequest) {
   }
 
   try {
-    const collection = getRecordingsCollection();
+    const collection = getRecordingsV2Collection();
     // Fetch ready recordings with metadata
     const cursor = collection.find(
       { status: 'ready' },

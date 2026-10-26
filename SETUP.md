@@ -66,7 +66,7 @@ npm run seed --workspace=packages/db
 
 The seeder:
 
-* creates the `recordings` collection with NVIDIA vectorize (`nvidia/nv-embedqa-e5-v5`, 1024 dims, cosine) and an indexing deny-list for the long free-text fields;
+* creates the `recordings_v2` collection with NVIDIA vectorize (`nvidia/nv-embedqa-e5-v5`, 1024 dims, cosine) and an indexing deny-list for the long free-text fields;
 * **first attempts** `lexical` + `rerank` (hybrid search) and retries without them if the database rejects them. Those are a region-limited public preview — AWS `us-east-2` Serverless (vector) only. Falling back is a *capability report, not a failure*: search then uses vector + `searchTokens` fusion, which works everywhere;
 * if the collection already exists, **checks it for drift** and exits non-zero listing the problems rather than pretending. Astra collection settings are immutable, so the only fix is:
 
@@ -111,7 +111,7 @@ curl -s http://localhost:3000/api/health | jq
 }
 ```
 
-`status` is `ok` only when Astra is reachable, the `recordings` collection **exists**,
+`status` is `ok` only when Astra is reachable, the `recordings_v2` collection **exists**,
 and both Docling and LLM credentials are present. `hybridSearch: false` is normal outside
 `us-east-2` and is not an error.
 
@@ -289,8 +289,8 @@ that team.
 | Message | Cause | Fix |
 |---|---|---|
 | `Missing ASTRA_DB_API_ENDPOINT or ASTRA_DB_APPLICATION_TOKEN env vars` | No `packages/api/.env.local`, or the file is at the repo root. | Create `packages/api/.env.local`. Next.js does not read a root env file. |
-| Health says `"collection": "missing"` and `The 'recordings' collection does not exist — run: npm run seed --workspace=packages/db` | Env is correct but the schema was never seeded. | Run the seed command. Without it every upload 500s with `COLLECTION_NOT_EXIST`. |
-| `[seed] Collection "recordings" exists with a definition this app cannot use` | The collection was created by an older version or by hand. Astra collection settings are immutable. | `npm run seed --workspace=packages/db -- --recreate` (drops all documents). |
+| Health says `"collection": "missing"` and `The 'recordings_v2' collection does not exist — run: npm run seed --workspace=packages/db` | Env is correct but the schema was never seeded. | Run the seed command. Without it every upload 500s with `COLLECTION_NOT_EXIST`. |
+| `[seed] Collection "recordings_v2" exists with a definition this app cannot use` | The collection was created by an older version or by hand. Astra collection settings are immutable. | `npm run seed --workspace=packages/db -- --recreate` (drops all documents). |
 | `Missing LLM_API_KEY env var` / `Missing LLM_MODEL env var` | Enrichment and chat are unconfigured. | Set both. `LLM_MODEL` has no default on purpose. |
 | `Missing DOCLING_SERVICE_URL` / `Missing DOCLING_API_KEY` | Transcription is unconfigured. | Set both, then run the smoke test. |
 | `EXPO_PUBLIC_API_URL is not set…` (thrown on native at first request) | Running on a device/emulator without a base URL. | Set `EXPO_PUBLIC_API_URL` in `apps/mobile/.env` to your LAN IP (or `10.0.2.2` on the Android emulator) and restart Expo. |

@@ -4,10 +4,7 @@
  * Single source of truth for identifiers shared by the schema seeder, the
  * collection accessor, and the capability probe.
  */
-export const RECORDINGS_COLLECTION = 'recordings';
-export const RECORDING_CHUNKS_COLLECTION = 'recording_chunks';
-/** V2 collections: clean two-collection design (see GitHub issue #34).
- *  Legacy v1 collections are left in place for posterity. */
+/** Clean two-collection design (see GitHub issue #34). */
 export const RECORDINGS_V2_COLLECTION = 'recordings_v2';
 export const RECORDING_CHUNKS_V2_COLLECTION = 'recording_chunks_v2';
 export const VECTOR_DIMENSION = 1024;
@@ -21,15 +18,7 @@ export const MAX_CHUNK_TRANSCRIPT_BYTES = 7500;
 export const MAX_TAGS = 32;
 export const MAX_TAG_CHARS = 64;
 export const MAX_SEARCH_TOKENS = 200;
-export const INDEXING_DENY = [
-  'transcript', 'summary', 'notes', 'keyTakeaways', 'actionItems',
-  'audioUrl', 'speakers', 'error', 'doclingTaskId',
-] as const;
-export const CHUNKS_INDEXING_DENY = [
-  'transcript', 'audioUrl',
-] as const;
-
-/** V2 deny lists.
+/** Deny lists.
  *  recordings_v2: adds 'chunks' as belt-and-suspenders even though the array
  *  is removed in the new design — guards against accidental backfill.
  *  recording_chunks_v2: denies 'transcript' so raw ASR text is never indexed

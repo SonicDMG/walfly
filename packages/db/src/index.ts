@@ -8,9 +8,6 @@
 
 export { getDb, isAstraHibernatingError } from './client';
 export {
-  getRecordingsCollection,
-  getRecordingChunksCollection,
-  ensureRecordingChunksCollection,
   getRecordingsV2Collection,
   getRecordingChunksV2Collection,
   ensureRecordingChunksV2Collection,

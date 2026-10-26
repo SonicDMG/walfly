@@ -49,7 +49,7 @@ export async function GET() {
 
   const capabilities = await getCollectionCapabilities();
 
-  // A reachable database with no `recordings` collection is the "why does
+  // A reachable database with no `recordings_v2` collection is the "why does
   // nothing work" case this route exists for: every upload 500s with
   // COLLECTION_NOT_EXIST, so it must never report a clean bill of health.
   const collection: 'ok' | 'missing' | 'unknown' = !capabilities.known
@@ -61,7 +61,7 @@ export async function GET() {
   if (collection === 'missing') {
     detail =
       detail ??
-      "The 'recordings' collection does not exist — run: npm run seed --workspace=packages/db";
+      "The 'recordings_v2' collection does not exist — run: npm run seed --workspace=packages/db";
   } else if (collection === 'unknown' && astra === 'ok') {
     detail = detail ?? 'Could not read the collection definition; hybrid-search support is unknown.';
   }

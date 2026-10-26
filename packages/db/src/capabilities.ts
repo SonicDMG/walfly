@@ -15,7 +15,7 @@
  */
 
 import { getDb } from './client';
-import { RECORDINGS_COLLECTION } from './constants';
+import { RECORDINGS_V2_COLLECTION } from './constants';
 
 export interface CollectionCapabilities {
   lexical: boolean;
@@ -46,7 +46,7 @@ export function getCollectionCapabilities(): Promise<CollectionCapabilities> {
 async function probeCapabilities(): Promise<CollectionCapabilities> {
   try {
     const list = await getDb().listCollections();
-    const descriptor = list.find((c) => c.name === RECORDINGS_COLLECTION);
+    const descriptor = list.find((c) => c.name === RECORDINGS_V2_COLLECTION);
     const definition = (descriptor?.definition ?? {}) as {
       lexical?: { enabled?: boolean };
       rerank?: { enabled?: boolean };
