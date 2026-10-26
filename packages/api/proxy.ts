@@ -56,12 +56,8 @@ export function proxy(request: NextRequest): NextResponse {
 
   const expected = process.env.WALFLY_API_TOKEN;
   if (!expected) {
-    // Fail closed and loud. An admin who forgot to set this should see
-    // "everything is broken, go set it" — never a silently wide-open API.
-    return NextResponse.json(
-      { error: 'Server misconfigured: WALFLY_API_TOKEN is not set' },
-      { status: 500, headers: corsHeaders() },
-    );
+    // Local / unauthenticated mode: pass through when no token is configured.
+    return NextResponse.next();
   }
 
   const [scheme, token] = (request.headers.get('authorization') ?? '').split(' ');
